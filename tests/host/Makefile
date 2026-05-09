@@ -13,10 +13,12 @@ CFLAGS  ?= -O2 -g -Wall -Wno-unused-but-set-variable -Wno-unused-parameter \
            -Wno-format -Wno-incompatible-pointer-types -Wno-int-conversion \
            -D__embedded__
 
-ROOT    := ../..
-YAAGC   := $(ROOT)/third_party/virtualagc/yaAGC
-AGC_CORE:= $(ROOT)/components/agc_core
-ROM     := $(ROOT)/build/roms/Luminary099.bin
+ROOT      := ../..
+YAAGC     := $(ROOT)/third_party/virtualagc/yaAGC
+AGC_CORE  := $(ROOT)/components/agc_core
+DISP_HAL  := $(ROOT)/components/display_hal
+CH_ROUTER := $(ROOT)/components/channel_router
+ROM       := $(ROOT)/build/roms/Luminary099.bin
 
 INC     := -I$(YAAGC) -I$(AGC_CORE)/include -I.
 
@@ -28,13 +30,23 @@ ENGINE_SRCS := \
 INIT_SRCS  := $(AGC_CORE)/agc_init.c
 HOST_STUBS := test_io_stub.c
 
-TESTS := test_rom_load test_engine_boot test_channel10_emit
+TESTS := test_rom_load test_engine_boot test_channel10_emit test_keypad_hit
 
 .PHONY: all run clean $(addprefix run-, $(TESTS))
 all: $(addsuffix .exe, $(TESTS))
 
+# Pattern rule for most tests: includes full engine
 %.exe: %.c $(ENGINE_SRCS) $(INIT_SRCS) $(HOST_STUBS)
 	$(CC) $(CFLAGS) $(INC) -o $@ $^ -lm
+
+# Special rule for test_keypad_hit: no engine, just keypad hit-test
+# (must come after pattern rule so it takes precedence)
+test_keypad_hit.exe: test_keypad_hit.c $(DISP_HAL)/dsky_keypad_320x240.c
+	$(CC) $(CFLAGS) \
+	    -I$(DISP_HAL)/include \
+	    -I$(CH_ROUTER)/include \
+	    -I. \
+	    -o $@ $^
 
 run: $(addprefix run-, $(TESTS))
 	@echo ALL PASS
