@@ -22,6 +22,7 @@
 #include "display_hal.h"
 #include "dsky_input.h"
 #include "display_panel_iface.h"
+#include "led_status_iface.h"
 #include "touch_input.h"
 #include "dsky_layout.h"
 
@@ -34,6 +35,7 @@ static const char *TAG = "app";
 
 extern const display_panel_iface_t *board_get_panel(void);
 extern const panel_touch_iface_t   *board_get_touch(void);
+extern const led_status_iface_t    *board_get_led(void);
 
 static apollo_rom_id_t pick_rom(void)
 {
@@ -71,6 +73,13 @@ static void ui_task(void *arg)
 void app_main(void)
 {
     board_init();
+
+    const led_status_iface_t *led = board_get_led();
+    if (led) {
+        led->init();
+        led->set_rgb(0xFF, 0x80, 0x00);   // amber while booting
+    }
+
     channel_router_init();
     display_hal_init();   // also brings up the ST7735 + APA102 silence path
 
@@ -111,4 +120,5 @@ void app_main(void)
     xTaskCreate(ui_task,  "ui",  6144, NULL,  5, NULL);
 
     ESP_LOGI(TAG, "espAGC running");
+    if (led) led->set_rgb(0x00, 0x40, 0x00);   // dim green = healthy
 }

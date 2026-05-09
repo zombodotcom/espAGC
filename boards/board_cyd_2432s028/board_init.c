@@ -2,6 +2,7 @@
 #include "board_pins.h"
 #include "ili9341_panel.h"
 #include "cst820.h"
+#include "rgb_gpio.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
 
@@ -43,9 +44,23 @@ static const panel_touch_iface_t s_touch = {
     .poll = cst820_poll,
 };
 
+static void cyd_led_init(void)
+{
+    rgb_gpio_pins_t p = {
+        .r = BOARD_LED_R, .g = BOARD_LED_G, .b = BOARD_LED_B,
+        .active_low = true,
+    };
+    rgb_gpio_init_with_pins(&p);
+}
+
+static const led_status_iface_t s_led = {
+    .init    = cyd_led_init,
+    .set_rgb = rgb_gpio_set_rgb,
+};
+
 const display_panel_iface_t *board_get_panel(void) { return &s_panel; }
 const panel_touch_iface_t   *board_get_touch(void) { return &s_touch; }
-const led_status_iface_t    *board_get_led(void)   { return NULL; }   // T16
+const led_status_iface_t    *board_get_led(void)   { return &s_led; }
 
 void board_init(void)
 {
