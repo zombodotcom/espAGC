@@ -4,3 +4,6 @@
 [submodule "third_party/virtualagc"]
 	path = third_party/virtualagc
 	url = https://github.com/virtualagc/virtualagc.git
+[submodule "third_party/CYD-reference"]
+	path = third_party/CYD-reference
+	url = https://github.com/witnessmenow/ESP32-Cheap-Yellow-Display.git
