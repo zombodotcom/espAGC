@@ -21,7 +21,10 @@
 #include "channel_router.h"
 #include "display_hal.h"
 #include "dsky_input.h"
-#include "led_status.h"
+// led_status driver disabled: the ST7735 panel driver owns GPIO 4/5 (APA102)
+// and silences the LED to avoid SPI-coupled flicker. Re-enable once we
+// integrate status indication into the panel renderer.
+// #include "led_status.h"
 
 #include "driver/gpio.h"
 #include "esp_log.h"
@@ -57,7 +60,6 @@ static void ui_task(void *arg)
         uint64_t gen = channel_router_snapshot(&state);
         if (gen != last_gen) {
             display_hal_update(&state);
-            led_status_update(&state);
             last_gen = gen;
         }
         vTaskDelay(pdMS_TO_TICKS(33));   // ~30 Hz
@@ -67,9 +69,8 @@ static void ui_task(void *arg)
 void app_main(void)
 {
     board_init();
-    led_status_init();
     channel_router_init();
-    display_hal_init();
+    display_hal_init();   // also brings up the ST7735 + APA102 silence path
 
     apollo_rom_id_t rom_id = pick_rom();
     size_t rom_size = 0;

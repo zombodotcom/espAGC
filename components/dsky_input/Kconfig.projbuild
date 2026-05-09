@@ -1,0 +1,26 @@
+menu "espAGC WiFi"
+
+config ESPAGC_WIFI_MODE_STA
+    bool "Connect to an existing WiFi network (STA mode)"
+    default y
+    help
+        When set, the dongle joins your home/office WiFi using the SSID
+        and password configured below, and serves the DSKY web UI on
+        whichever IP the AP assigned it. Falls back to SoftAP if those
+        fields are empty.
+
+config ESPAGC_WIFI_SSID
+    string "WiFi SSID"
+    depends on ESPAGC_WIFI_MODE_STA
+    default ""
+    help
+        SSID to connect to. Leave empty to fall back to SoftAP "espAGC".
+
+config ESPAGC_WIFI_PASSWORD
+    string "WiFi password"
+    depends on ESPAGC_WIFI_MODE_STA
+    default ""
+    help
+        WPA/WPA2 passphrase for the SSID above.
+
+endmenu
