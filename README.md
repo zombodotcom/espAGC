@@ -8,7 +8,7 @@ The emulator core is yaAGC. License is **GPL v2** (carries through from yaAGC).
 
 | Layer | Status | Notes |
 |---|---|---|
-| Layer 1 — host tests (`tests/host/`) | **3/3 PASS** | ROM loader, engine boot, channel-10 DSKY emit |
+| Layer 1 — host tests (`tests/host/`) | **4/4 PASS** | ROM loader, engine boot, channel-10 DSKY emit, keypad hit-test |
 | Layer 2 — QEMU | **deferred** | QEMU integration deferred. |
 | Layer 3 — hardware | **boots, runs** | Firmware brings up the ILI9341 panel, loads Luminary099, joins WiFi (or falls back to a SoftAP `espAGC`), and accepts taps on the on-screen 19-key keypad. |
 
@@ -88,13 +88,14 @@ cd tests\host
 mingw32-make run    # gcc must be on PATH
 ```
 
-Three tests, each PASS in well under a second:
+Four tests, each PASS in well under a second:
 
 | Test | What it asserts |
 |---|---|
 | `test_rom_load` | ROM bank-reorder loader produces the right Fixed[bank][word] layout |
 | `test_engine_boot` | 50 000 AGC cycles run cleanly; PC moves off boot vector |
 | `test_channel10_emit` | Engine emits writes to ch010 (DSKY display) + ch011 (status) within 200 000 cycles |
+| `test_keypad_hit` | 320×240 keypad cell centers map to the right `dsky_key_t` codes; out-of-bounds returns -1 |
 
 The Makefile compiles `agc_engine.c` straight from the virtualagc submodule
 plus our `agc_init.c` and a host-side IO stub — no ESP-IDF, no FreeRTOS
