@@ -21,6 +21,9 @@
 #include "channel_router.h"
 #include "display_hal.h"
 #include "dsky_input.h"
+#include "display_panel_iface.h"
+#include "touch_input.h"
+#include "dsky_layout.h"
 
 #include "driver/gpio.h"
 #include "esp_log.h"
@@ -28,6 +31,9 @@
 #include "freertos/task.h"
 
 static const char *TAG = "app";
+
+extern const display_panel_iface_t *board_get_panel(void);
+extern const panel_touch_iface_t   *board_get_touch(void);
 
 static apollo_rom_id_t pick_rom(void)
 {
@@ -81,12 +87,23 @@ void app_main(void)
     }
 
     dsky_input_config_t in_cfg = {
-        .enable_usb_cdc = true,
+        .enable_usb_cdc = false,    // CYD has CP2102 USB-UART, no USB-Serial-JTAG
         .enable_wifi_ap = true,
         .wifi_ssid = "espAGC",
         .wifi_password = "",     // open network
     };
     dsky_input_start(&in_cfg);
+
+    const panel_touch_iface_t *touch = board_get_touch();
+    if (touch) {
+        const display_panel_iface_t *panel = board_get_panel();
+        const dsky_layout_t *layout = dsky_layout_for(panel->width, panel->height);
+        if (layout && layout->hit_test) {
+            touch_input_start(touch, layout->hit_test);
+        } else {
+            ESP_LOGW(TAG, "touch present but layout has no hit_test — skipping");
+        }
+    }
 
     // ESP32-C5 is single-core ("Unicore app" in boot log) — no core 1 to
     // pin to. Use plain xTaskCreate; FreeRTOS picks the only core (0).

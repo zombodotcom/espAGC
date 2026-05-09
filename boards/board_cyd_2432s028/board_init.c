@@ -1,6 +1,7 @@
 // boards/board_cyd_2432s028/board_init.c
 #include "board_pins.h"
 #include "ili9341_panel.h"
+#include "cst820.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
 
@@ -26,8 +27,24 @@ static const display_panel_iface_t s_panel = {
     .draw_rows  = ili9341_draw_rows,
 };
 
+static esp_err_t cyd_touch_init(void)
+{
+    cst820_pins_t p = {
+        .sda  = BOARD_TOUCH_SDA,
+        .scl  = BOARD_TOUCH_SCL,
+        .rst  = BOARD_TOUCH_RST,
+        .intr = BOARD_TOUCH_INT,
+    };
+    return cst820_init_with_pins(&p);
+}
+
+static const panel_touch_iface_t s_touch = {
+    .init = cyd_touch_init,
+    .poll = cst820_poll,
+};
+
 const display_panel_iface_t *board_get_panel(void) { return &s_panel; }
-const panel_touch_iface_t   *board_get_touch(void) { return NULL; }   // T15
+const panel_touch_iface_t   *board_get_touch(void) { return &s_touch; }
 const led_status_iface_t    *board_get_led(void)   { return NULL; }   // T16
 
 void board_init(void)

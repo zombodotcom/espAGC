@@ -1,0 +1,23 @@
+# components/touch_input/Kconfig.projbuild
+menu "espAGC touch driver"
+
+choice ESPAGC_CYD_TOUCH
+    prompt "CYD touch controller"
+    default ESPAGC_CYD_TOUCH_CST820
+    help
+        Selects the touch driver for ESP32-2432S028 variants.
+        Only CST820 is implemented in v1; GT911/XPT2046 are reserved
+        for follow-up work.
+
+config ESPAGC_CYD_TOUCH_CST820
+    bool "CST820 (capacitive — 2432S028C)"
+
+config ESPAGC_CYD_TOUCH_GT911
+    bool "GT911 (capacitive — alternate)"
+
+config ESPAGC_CYD_TOUCH_XPT2046
+    bool "XPT2046 (resistive — 2432S028R)"
+
+endchoice
+
+endmenu
