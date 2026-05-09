@@ -1,10 +1,10 @@
 // app_main.c — espAGC top-level glue.
 //
 //  +---------------------+   +---------------------+
-//  | agc_task (core 1)   |   | ui_task (core 0)    |
+//  | agc_task            |   | ui_task             |
 //  | runs agc_core_step  |   | snapshots state and |
-//  | engine writes go    |   | renders LVGL DSKY,  |
-//  | through io_callbacks|   | drives status LED   |
+//  | engine writes go    |   | renders the 320x240 |
+//  | through io_callbacks|   | DSKY framebuffer    |
 //  +----------+----------+   +----------+----------+
 //             │                          ▲
 //             ▼                          │
@@ -12,7 +12,7 @@
 //             ▲
 //             │
 //   +---------+----------+----------+
-//   | usb_cdc | wifi_ap  | (button) |
+//   | touch   | wifi_ap  | (button) |
 //   +--------------------+----------+
 
 #include "agc_core.h"
@@ -81,7 +81,7 @@ void app_main(void)
     }
 
     channel_router_init();
-    display_hal_init();   // also brings up the ST7735 + APA102 silence path
+    display_hal_init();   // brings up the ILI9341 panel + 320x240 layout
 
     apollo_rom_id_t rom_id = pick_rom();
     size_t rom_size = 0;
@@ -114,8 +114,7 @@ void app_main(void)
         }
     }
 
-    // ESP32-C5 is single-core ("Unicore app" in boot log) — no core 1 to
-    // pin to. Use plain xTaskCreate; FreeRTOS picks the only core (0).
+    // ESP32 dual-core; let FreeRTOS distribute across cores by default.
     xTaskCreate(agc_task, "agc", 6144, NULL, 10, NULL);
     xTaskCreate(ui_task,  "ui",  6144, NULL,  5, NULL);
 

@@ -32,8 +32,11 @@
 #define ILI_MADCTL    0x36
 #define ILI_PIXFMT    0x3A
 
-// MADCTL: MV=1, MX=0, MY=0, BGR=1 -> 320x240 landscape, BGR order
-#define MADCTL_LANDSCAPE 0x28
+// MADCTL: MX=1, MV=1, BGR=1 -> 320x240 landscape, BGR order. Matches the
+// witnessmenow CYD reference (third_party/CYD-reference) for the C variant.
+// If on-bringup the image looks horizontally flipped, try 0x28 (drop MX);
+// if vertically flipped, try 0xE8 (add MY); if rotated 180, try 0xA8.
+#define MADCTL_LANDSCAPE 0x68
 
 static const char *TAG = "ili9341";
 
