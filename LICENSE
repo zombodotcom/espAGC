@@ -1,0 +1,16 @@
+                    GNU GENERAL PUBLIC LICENSE
+                       Version 2, June 1991
+
+ Copyright (C) 1989, 1991 Free Software Foundation, Inc.,
+ 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+ Everyone is permitted to copy and distribute verbatim copies
+ of this license document, but changing it is not allowed.
+
+This project links the yaAGC emulator core from
+https://github.com/virtualagc/virtualagc which is licensed under GNU
+General Public License v2. As a derivative work, espAGC is also released
+under GPL v2.
+
+The full text of GPL v2 is available at
+https://www.gnu.org/licenses/old-licenses/gpl-2.0.txt and a copy is
+distributed with the virtualagc submodule under third_party/virtualagc/COPYING.

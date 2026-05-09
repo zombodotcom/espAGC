@@ -1,0 +1,5 @@
+# LCD/LVGL deferred. Bring back lvgl/lvgl + esp_lvgl_port + a working ST7735
+# driver (port from dosNew/esp-dos/firmware/components/display/st7735_panel.c —
+# the waveshare/esp_lcd_st7735 managed component is broken for this panel)
+# once Layer 1 host tests + bare-bones IDF firmware are green.
+dependencies: {}
