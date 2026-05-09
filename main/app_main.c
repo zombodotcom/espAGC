@@ -21,10 +21,6 @@
 #include "channel_router.h"
 #include "display_hal.h"
 #include "dsky_input.h"
-// led_status driver disabled: the ST7735 panel driver owns GPIO 4/5 (APA102)
-// and silences the LED to avoid SPI-coupled flicker. Re-enable once we
-// integrate status indication into the panel renderer.
-// #include "led_status.h"
 
 #include "driver/gpio.h"
 #include "esp_log.h"
