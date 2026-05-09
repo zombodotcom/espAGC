@@ -109,9 +109,11 @@ esp_err_t ili9341_init(const ili9341_pins_t *pins)
 
     gpio_config_t bl = { .pin_bit_mask = 1ULL << s_pins.bl, .mode = GPIO_MODE_OUTPUT };
     ESP_RETURN_ON_ERROR(gpio_config(&bl), TAG, "gpio_config BL");
-    gpio_set_level(s_pins.bl, 1);   // active-high
+    gpio_set_level(s_pins.bl, s_pins.bl_active_low ? 0 : 1);   // turn on
 
-    ESP_LOGI(TAG, "ILI9341 ready: %dx%d landscape", ILI_W, ILI_H);
+    ESP_LOGI(TAG, "ILI9341 ready: %dx%d landscape (BL gpio=%d %s)",
+             ILI_W, ILI_H, s_pins.bl,
+             s_pins.bl_active_low ? "active-low" : "active-high");
     return ESP_OK;
 }
 

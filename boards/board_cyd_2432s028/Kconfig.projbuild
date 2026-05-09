@@ -1,0 +1,24 @@
+menu "espAGC CYD board"
+
+config ESPAGC_CYD_LCD_BL_GPIO
+    int "LCD backlight GPIO"
+    default 27
+    range 0 39
+    help
+        GPIO driving the ILI9341 backlight transistor on the CYD-2432S028C.
+        The original C variant uses GPIO27 (BL moved off 21 to free that pin
+        for the CST820 touch INT). Some C revisions still wire BL on GPIO21.
+        If the screen stays dark on boot but `ili9341 ready ...` appears in
+        the log, try toggling this between 27 and 21.
+
+config ESPAGC_CYD_LCD_BL_ACTIVE_LOW
+    bool "LCD backlight is active-low"
+    default n
+    help
+        When set, the firmware drives the backlight GPIO LOW to turn the
+        panel on. Some CYD-C revisions wire the backlight through a PNP
+        transistor and need active-low; the more common path is a direct
+        active-high MOSFET. If toggling the BL GPIO didn't fix a dark
+        screen, try toggling this.
+
+endmenu

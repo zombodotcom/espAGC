@@ -9,13 +9,14 @@
 static const char *TAG = "board";
 
 static const ili9341_pins_t s_lcd_pins = {
-    .sck  = BOARD_LCD_SCK,
-    .mosi = BOARD_LCD_MOSI,
-    .miso = BOARD_LCD_MISO,
-    .cs   = BOARD_LCD_CS,
-    .dc   = BOARD_LCD_DC,
-    .rst  = BOARD_LCD_RST,
-    .bl   = BOARD_LCD_BL,
+    .sck            = BOARD_LCD_SCK,
+    .mosi           = BOARD_LCD_MOSI,
+    .miso           = BOARD_LCD_MISO,
+    .cs             = BOARD_LCD_CS,
+    .dc             = BOARD_LCD_DC,
+    .rst            = BOARD_LCD_RST,
+    .bl             = BOARD_LCD_BL,
+    .bl_active_low  = BOARD_LCD_BL_ACTIVE_LOW,
 };
 
 static esp_err_t cyd_panel_init(void) { return ili9341_init(&s_lcd_pins); }

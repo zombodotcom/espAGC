@@ -4,9 +4,12 @@
 // Pin map for ESP32-2432S028C ("Cheap Yellow Display", 2.8" capacitive variant).
 // Reference: third_party/CYD-reference (witnessmenow/ESP32-Cheap-Yellow-Display).
 //
-// The "C" capacitive variant moves the LCD backlight from GPIO21 (where the
-// "R" resistive variant has it) to GPIO27, which frees GPIO21 for the
-// CST820 touch INT line.
+// The backlight pin and polarity vary across CYD-C board revisions, so they
+// are exposed as Kconfig knobs (`espAGC CYD board` menu in menuconfig).
+// Most C variants use GPIO27 active-high; some use GPIO21, some are
+// active-low. Toggle there if the screen stays dark on boot.
+
+#include "sdkconfig.h"
 
 #define BOARD_NAME "CYD-2432S028C"
 
@@ -19,7 +22,8 @@
 #define BOARD_LCD_CS     15
 #define BOARD_LCD_DC     2
 #define BOARD_LCD_RST    -1      // tied to EN — no GPIO control
-#define BOARD_LCD_BL     27      // active-high backlight
+#define BOARD_LCD_BL             CONFIG_ESPAGC_CYD_LCD_BL_GPIO
+#define BOARD_LCD_BL_ACTIVE_LOW  CONFIG_ESPAGC_CYD_LCD_BL_ACTIVE_LOW
 
 // Touch: CST820 capacitive (I2C, 7-bit addr 0x15)
 #define BOARD_TOUCH_SDA  33
