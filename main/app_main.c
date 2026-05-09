@@ -96,7 +96,6 @@ void app_main(void)
     }
 
     dsky_input_config_t in_cfg = {
-        .enable_usb_cdc = false,    // CYD has CP2102 USB-UART, no USB-Serial-JTAG
         .enable_wifi_ap = true,
         .wifi_ssid = "espAGC",
         .wifi_password = "",     // open network

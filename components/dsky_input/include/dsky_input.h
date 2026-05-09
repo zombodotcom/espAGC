@@ -2,11 +2,11 @@
 //
 // dsky_input — input transports that feed channel_router_post_key().
 //
-//  USB-CDC ──┐
-//  WiFi WS ──┼─► key_parse ─► channel_router_post_key(code5)
+//  WiFi WS ──┐
+//  Touch ────┼─► key_parse ─► channel_router_post_key(code5)
 //  Boot btn ─┘
 //
-// Each transport is independent; turn one off in dsky_input_config_t.
+// (Touch lives in components/touch_input. WiFi web DSKY lives here.)
 
 #include <stdbool.h>
 
@@ -15,7 +15,6 @@ extern "C" {
 #endif
 
 typedef struct {
-    bool enable_usb_cdc;
     bool enable_wifi_ap;
     const char *wifi_ssid;        // NULL → "espAGC"
     const char *wifi_password;    // NULL or "" → open network
