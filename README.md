@@ -1,12 +1,6 @@
-# espAGC — Apollo Guidance Computer on the LilyGO T-Dongle-C5
+# espAGC — Apollo Guidance Computer on the Cheap Yellow Display (ESP32-2432S028C)
 
-A self-contained Apollo Guidance Computer running on the ESP32-C5HR8 inside a
-[LilyGO T-Dongle-C5](https://github.com/Xinyuan-LilyGO/T-Dongle-C5).
-The dongle becomes a self-contained DSKY — controllable from USB-Serial-JTAG
-*and* a built-in WiFi web UI. Both **Luminary 099 (LM)** and **Comanche 055
-(CSM)** mission ROMs are assembled at build time from the original AGC sources
-in [virtualagc/virtualagc](https://github.com/virtualagc/virtualagc) via
-yaYUL, and embedded directly in the firmware.
+A self-contained Apollo Guidance Computer running on the ESP32-WROOM-32 inside an [ESP32-2432S028C "Cheap Yellow Display"](https://github.com/witnessmenow/ESP32-Cheap-Yellow-Display). The board becomes a self-contained DSKY — controlled from a 320×240 on-screen 19-key touch keypad, *and* the existing WiFi web UI. Both **Luminary 099 (LM)** and **Comanche 055 (CSM)** mission ROMs are assembled at build time from the original AGC sources in [virtualagc/virtualagc](https://github.com/virtualagc/virtualagc) via yaYUL, and embedded directly in the firmware.
 
 The emulator core is yaAGC. License is **GPL v2** (carries through from yaAGC).
 
@@ -15,13 +9,10 @@ The emulator core is yaAGC. License is **GPL v2** (carries through from yaAGC).
 | Layer | Status | Notes |
 |---|---|---|
 | Layer 1 — host tests (`tests/host/`) | **3/3 PASS** | ROM loader, engine boot, channel-10 DSKY emit |
-| Layer 2 — QEMU | **deferred** | No QEMU machine for ESP32-C5 in mainline or [Espressif's QEMU fork](https://github.com/espressif/qemu) (latest `esp-develop-9.2.2-20260417` covers ESP32 / C3 / S3 only). A parallel S3 build is on the roadmap to enable Layer 2. |
-| Layer 3 — hardware | **boots, runs** | Firmware brings up PSRAM, loads Luminary099, opens an `espAGC` SoftAP at `http://192.168.4.1/`, and accepts USB-Serial-JTAG keypresses. |
+| Layer 2 — QEMU | **deferred** | QEMU integration deferred. |
+| Layer 3 — hardware | **boots, runs** | Firmware brings up the ILI9341 panel, loads Luminary099, joins WiFi (or falls back to a SoftAP `espAGC`), and accepts taps on the on-screen 19-key keypad. |
 
-DSKY output currently logs to UART. The on-panel **ST7735 + LVGL DSKY UI is
-queued** — the maintained `waveshare/esp_lcd_st7735` managed component is
-broken on this exact panel (wrong INVON/INVOFF, wrong reset timing, wrong
-MADCTL); the right path is to port a known-good direct driver.
+DSKY output renders as a 320×240 framebuffer on the ILI9341 panel — status panel, register window, and an on-screen 19-key keypad backed by the CST820 capacitive touchscreen. No LVGL — direct framebuffer in 80-row strips, three passes per frame.
 
 ## Layout
 
@@ -36,26 +27,29 @@ components/
                      via EMBED_FILES.
   channel_router/    AGC IO channels <-> a dsky_state_t snapshot, with a
                      lock-free input ringbuffer for keystrokes.
-  display_hal/       Pluggable display backend. Default = console
-                     (logs DSKY snapshot over UART). Reserved seat
-                     for a real LVGL+ST7735 panel impl.
-  dsky_input/        USB-CDC (USB-Serial-JTAG) and WiFi (HTTP POST /key)
-                     transports, both feeding channel_router.
-  led_status/        APA102 RGB LED status indicator.
-  board_tdongle_c5/  Pin map + minimal board init.
+  display_hal/       320x240 DSKY renderer. ILI9341 panel driver,
+                     dsky_layout_320x240, framebuffer rendered in
+                     three 80-row strips.
+  touch_input/       CST820 capacitive driver + 50 Hz poll task that
+                     posts decoded keys via channel_router_post_key.
+  dsky_input/        WiFi (HTTP POST /key) transport feeding channel_router.
+  led_status/        3-GPIO RGB LED driver (active-low) for the CYD's
+                     onboard status LED.
+boards/
+  board_cyd_2432s028/  Pin map + factory functions returning panel,
+                       touch, and LED ifaces.
 main/                app_main.c — boot sequence + task spawn.
 tests/host/          Layer 1 host gcc tests. ~1 s to run.
 tools/
   build_yayul.cmake     ExternalProject for host yaYUL.
   yayul_host_project/   Top-level CMakeLists wrapper for yaYUL.
   assemble_rom.cmake    Custom command runner: yaYUL MAIN.agc -> bank-ordered .bin.
-third_party/         Submodules: virtualagc, Apollo-11, T-Dongle-C5.
+third_party/         Submodules: virtualagc, Apollo-11, CYD-reference.
 ```
 
 ## Build & flash
 
-Requires **ESP-IDF v6.0+** (ESP32-C5 support) and a host C compiler (MinGW-w64
-on Windows; gcc/clang on Linux/macOS) for yaYUL.
+Requires **ESP-IDF v6.0+** and a host C compiler (MinGW-w64 on Windows; gcc/clang on Linux/macOS) for yaYUL.
 
 ```powershell
 git clone --recurse-submodules https://github.com/zombodotcom/espAGC.git
@@ -64,7 +58,7 @@ cd espAGC
 # activate IDF (path may differ)
 . C:\esp\v6.0.1\esp-idf\export.ps1
 
-idf.py set-target esp32c5
+idf.py set-target esp32
 idf.py build       # ~2 min cold (host yaYUL build + LM/CSM assembly)
 idf.py -p COM<n> flash monitor
 ```
@@ -73,21 +67,19 @@ On boot you'll see something like:
 
 ```
 I (1507) app: loading ROM Luminary099 (73728 bytes)
-I (1507) usb_cdc: USB-Serial-JTAG DSKY input ready
 I (2227) wifi_input: WiFi AP 'espAGC' up; web DSKY at http://192.168.4.1/
+I (2300) ili9341: ILI9341 ready: 320x240 landscape
+I (2301) dsky:    display_hal up: 320x240, strip_h=80
+I (2305) cst820:  CST820 ready (sda=33 scl=32 rst=25)
+I (2306) touch:   touch_input task up
 ```
 
 Hold the boot button at reset to switch ROM to Comanche055.
 
 ### DSKY input
 
-- **USB-Serial-JTAG**: type characters into `idf.py monitor` or any serial
-  terminal. Single-character keys: digits `0`-`9`, `+`, `-`, and the
-  shortcuts `V` (VERB), `N` (NOUN), `E` (ENTR), `C` (CLR), `P` (PRO),
-  `R` (RSET), `K` (KEYREL).
-- **WiFi web UI**: connect to the open AP `espAGC`, browse to
-  `http://192.168.4.1/`. SPA has a 19-button DSKY keypad and physical-keyboard
-  shortcuts.
+- **Touchscreen**: tap the on-screen 19-key keypad. Same key set as the WiFi web UI.
+- **WiFi web UI**: connect to the network configured in `idf.py menuconfig` → espAGC WiFi (or to the open AP `espAGC` if no SSID is set), browse to `http://<dongle-ip>/` (or `http://192.168.4.1/` in SoftAP mode). SPA has a 19-button DSKY keypad and physical-keyboard shortcuts.
 
 ## Layer 1 host tests
 
@@ -112,8 +104,6 @@ involvement.
 
 - ESP-IDF v6.0+
 - MinGW-w64 / gcc / clang on the host (for yaYUL)
-- LVGL + esp_lvgl_port — currently unused; will return when the ST7735 driver
-  is ported in.
 
 ## License
 
