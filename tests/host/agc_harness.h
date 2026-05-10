@@ -38,6 +38,22 @@ void harness_snapshot(dsky_state_t *out);
 // Read the agc_engine internal alarm flags directly.
 void harness_alarms(harness_alarms_t *out);
 
+// Read Luminary's FAILREG alarm-code FIFO. Per ALARM_AND_ABORT.agc:71-86,
+// the ALARM routine stores the alarm code in FAILREG[0] on first alarm,
+// FAILREG[1] on second distinct alarm, FAILREG[2] on third. PROGLARM
+// (DSPTAB+11D bit 9) is set only by the first-alarm path; subsequent
+// alarms just stack codes without re-lighting the lamp.
+//
+// FAILREG sits at erasable address octal 0375 (bank 0, offset 0375 per
+// MAIN.agc.html symtab). FAILREG +1 at 0376, FAILREG +2 at 0377.
+typedef struct {
+    int latest;       // FAILREG[0] = state->Erasable[0][0375]
+    int second;       // FAILREG[1] = state->Erasable[0][0376]
+    int third;        // FAILREG[2] = state->Erasable[0][0377]
+} harness_failreg_t;
+
+void harness_failreg(harness_failreg_t *out);
+
 // Convenience: type out a string of DSKY tokens. Whitespace is ignored.
 //   "V37E00E" -> VERB, 3, 7, ENTR, 0, 0, ENTR
 // Each key advances the engine by `gap_cycles` cycles before the next.

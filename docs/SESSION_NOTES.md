@@ -91,3 +91,24 @@ In priority order:
 - Don't add LVGL. Renderer + tests prove direct framebuffer is faster, simpler, and testable.
 - Don't try QEMU. There is no published QEMU support for ESP32-WROOM (or C5) that handles SPI panels + touch. Layer 2 host tests cover ~95 % of what we'd need QEMU for at zero infrastructure cost.
 - Don't downgrade ESP-IDF. We're on v6.0.1; older versions miss the ESP32-C5 target and the `esp_driver_*` split.
+
+## 2026-05-10 update — FAILREG diagnostic
+
+Added `harness_failreg()` (tests/host/agc_harness.{h,c}) and `tests/host/test_failreg_diagnostic.c`. Boots Luminary, steps 10M cycles, reports the alarm-code FIFO (FAILREG[0..2] at erasable `0375..0377` bank 0). Result:
+
+```
+first prog_alarm=1 observed at cycle 100000
+first FAILREG[0] non-zero at cycle 100000
+final FAILREG: [01107,00000,00000] octal
+final prog_alarm=1 restart=1
+```
+
+**Only alarm fired in 10M cycles is `01107` = NIGHT WATCHMAN** (yaAGC's executive-heartbeat watchdog — set in `agc_engine.c:2065-2076` when NEWJOB at address 067 isn't accessed within ~640ms of SCALER1 hitting `04000`). No peripheral alarms (no `0207` ITURNON, no `0214` IMUOP, no `0514` RRAUTCHK) — meaning **a peripheral simulator is not what's keeping the lamp lit**.
+
+The NW trip happens once during boot, then the engine recovers (`comp_acty` blinking, `NightWatchmanTripped == 0` post-recovery). The lamp stays on because `FAILREG[0]` retains the historical code, and `DSPTAB+11D` bit 9 is never cleared. The ERROR routine (`PINBALL_GAME__BUTTONS_AND_LIGHTS.agc:3744-3801`) is supposed to clear both on RSET — including `TS FAILREG; TS FAILREG +1; TS FAILREG +2` at lines 3796-3799 — but our `test_failreg_diagnostic` shows FAILREG stays `01107` after auto-RSET fires at tick 16, meaning **the keypress isn't reaching ERROR via KEYRUPT1**.
+
+Both `test_rset_clears_alarms` and `test_failreg_diagnostic` show `prog_alarm=1` post-RSET. The hardware-direct WriteIO path clears `RestartLight` (engine flag) — that works. The software KEYRUPT1 path (interrupt index 5, `state->InterruptRequests[5] = 1`) is set by `channel_router_pump_input` but Luminary's ERROR routine doesn't run.
+
+**Implication for the LM_Simulator plan**: the proposed CDU/IMU/radar simulator (Path A) would solve problems that aren't firing. The real bug is in the keypress → KEYRUPT1 → ERROR path. Likely candidates: interrupt index wrong (it's 5, matches Luminary's lead-in vector — already verified), `AllowInterrupt` is 0 during the auto-RSET fire, or our `channel_router_pump_input` has a race with engine state.
+
+Plan pivoted: investigate why ERROR isn't running before building any simulator infrastructure.

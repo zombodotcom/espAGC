@@ -61,6 +61,14 @@ void harness_alarms(harness_alarms_t *out)
     out->generated_warning      = s->GeneratedWarning      != 0;
 }
 
+void harness_failreg(harness_failreg_t *out)
+{
+    agc_t *s = agc_core_state();
+    out->latest = s->Erasable[0][0375];
+    out->second = s->Erasable[0][0376];
+    out->third  = s->Erasable[0][0377];
+}
+
 static int parse_one(char c)
 {
     c = (char)toupper((unsigned char)c);
