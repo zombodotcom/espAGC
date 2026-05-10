@@ -1,9 +1,10 @@
 // boards/board_cyd_2432s028/board_init.c
 #include "board_pins.h"
 #include "ili9341_panel.h"
-#include "cst820.h"
+#include "xpt2046.h"
 #include "rgb_gpio.h"
 #include "driver/gpio.h"
+#include "driver/spi_master.h"
 #include "esp_log.h"
 
 static const char *TAG = "board";
@@ -31,18 +32,25 @@ static const display_panel_iface_t s_panel = {
 
 static esp_err_t cyd_touch_init(void)
 {
-    cst820_pins_t p = {
-        .sda  = BOARD_TOUCH_SDA,
-        .scl  = BOARD_TOUCH_SCL,
-        .rst  = BOARD_TOUCH_RST,
-        .intr = BOARD_TOUCH_INT,
+    xpt2046_pins_t p = {
+        .host       = SPI3_HOST,             // VSPI; LCD is on SPI2_HOST
+        .sck        = BOARD_TOUCH_SCK,
+        .mosi       = BOARD_TOUCH_MOSI,
+        .miso       = BOARD_TOUCH_MISO,
+        .cs         = BOARD_TOUCH_CS,
+        .irq        = BOARD_TOUCH_IRQ,
+        .swap_xy    = true,                  // panel is in landscape
+        .invert_x   = false,
+        .invert_y   = true,
+        .panel_w    = BOARD_LCD_HRES,        // 320
+        .panel_h    = BOARD_LCD_VRES,        // 240
     };
-    return cst820_init_with_pins(&p);
+    return xpt2046_init_with_pins(&p);
 }
 
 static const panel_touch_iface_t s_touch = {
     .init = cyd_touch_init,
-    .poll = cst820_poll,
+    .poll = xpt2046_poll,
 };
 
 static void cyd_led_init(void)

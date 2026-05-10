@@ -11,9 +11,10 @@
 
 #include "sdkconfig.h"
 
-#define BOARD_NAME "CYD-2432S028C"
+#define BOARD_NAME "CYD-2432S028"
 
-// LCD: ILI9341, 240x320 native; rotated to 320x240 landscape via MADCTL
+// LCD: ILI9341, 240x320 native; rotated to 320x240 landscape via MADCTL.
+// Lives on HSPI / SPI2_HOST (the LCD pins 14/13/12/15 are HSPI's defaults).
 #define BOARD_LCD_HRES   320
 #define BOARD_LCD_VRES   240
 #define BOARD_LCD_SCK    14
@@ -25,11 +26,13 @@
 #define BOARD_LCD_BL             CONFIG_ESPAGC_CYD_LCD_BL_GPIO
 #define BOARD_LCD_BL_ACTIVE_LOW  CONFIG_ESPAGC_CYD_LCD_BL_ACTIVE_LOW
 
-// Touch: CST820 capacitive (I2C, 7-bit addr 0x15)
-#define BOARD_TOUCH_SDA  33
-#define BOARD_TOUCH_SCL  32
-#define BOARD_TOUCH_RST  25
-#define BOARD_TOUCH_INT  21
+// Touch: XPT2046 resistive (SPI on its own bus, VSPI / SPI3_HOST so it
+// doesn't share the LCD bus). Pins per witnessmenow CYD PINS.md.
+#define BOARD_TOUCH_SCK  25
+#define BOARD_TOUCH_MOSI 32
+#define BOARD_TOUCH_MISO 39      // input-only pin — fine for SPI MISO
+#define BOARD_TOUCH_CS   33
+#define BOARD_TOUCH_IRQ  36      // input-only pin
 
 // RGB LED — 3 separate active-low GPIOs
 #define BOARD_LED_R       4

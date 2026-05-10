@@ -1,6 +1,6 @@
-# espAGC — Apollo Guidance Computer on the Cheap Yellow Display (ESP32-2432S028C)
+# espAGC — Apollo Guidance Computer on the Cheap Yellow Display (ESP32-2432S028)
 
-A self-contained Apollo Guidance Computer running on the ESP32-WROOM-32 inside an [ESP32-2432S028C "Cheap Yellow Display"](https://github.com/witnessmenow/ESP32-Cheap-Yellow-Display). The board becomes a self-contained DSKY — controlled from a 320×240 on-screen 19-key touch keypad, *and* the existing WiFi web UI. Both **Luminary 099 (LM)** and **Comanche 055 (CSM)** mission ROMs are assembled at build time from the original AGC sources in [virtualagc/virtualagc](https://github.com/virtualagc/virtualagc) via yaYUL, and embedded directly in the firmware.
+A self-contained Apollo Guidance Computer running on the ESP32-WROOM-32 inside an [ESP32-2432S028 "Cheap Yellow Display"](https://github.com/witnessmenow/ESP32-Cheap-Yellow-Display) (the canonical 2.8" CYD with resistive XPT2046 touch). The board becomes a self-contained DSKY — controlled from a 320×240 on-screen 19-key touch keypad, *and* the existing WiFi web UI. Both **Luminary 099 (LM)** and **Comanche 055 (CSM)** mission ROMs are assembled at build time from the original AGC sources in [virtualagc/virtualagc](https://github.com/virtualagc/virtualagc) via yaYUL, and embedded directly in the firmware.
 
 The emulator core is yaAGC. License is **GPL v2** (carries through from yaAGC).
 
@@ -12,7 +12,7 @@ The emulator core is yaAGC. License is **GPL v2** (carries through from yaAGC).
 | Layer 2 — QEMU | **deferred** | QEMU integration deferred. |
 | Layer 3 — hardware | **boots, runs** | Firmware brings up the ILI9341 panel, loads Luminary099, joins WiFi (or falls back to a SoftAP `espAGC`), and accepts taps on the on-screen 19-key keypad. |
 
-DSKY output renders as a 320×240 framebuffer on the ILI9341 panel — status panel, register window, and an on-screen 19-key keypad backed by the CST820 capacitive touchscreen. No LVGL — direct framebuffer in 80-row strips, three passes per frame.
+DSKY output renders as a 320×240 framebuffer on the ILI9341 panel — status panel, register window, and an on-screen 19-key keypad backed by the XPT2046 resistive touchscreen. No LVGL — direct framebuffer in 80-row strips, three passes per frame.
 
 ## Layout
 
@@ -30,7 +30,7 @@ components/
   display_hal/       320x240 DSKY renderer. ILI9341 panel driver,
                      dsky_layout_320x240, framebuffer rendered in
                      three 80-row strips.
-  touch_input/       CST820 capacitive driver + 50 Hz poll task that
+  touch_input/       XPT2046 resistive driver + 50 Hz poll task that
                      posts decoded keys via channel_router_post_key.
   dsky_input/        WiFi (HTTP POST /key) transport feeding channel_router.
   led_status/        3-GPIO RGB LED driver (active-low) for the CYD's
@@ -70,7 +70,7 @@ I (1507) app: loading ROM Luminary099 (73728 bytes)
 I (2227) wifi_input: WiFi AP 'espAGC' up; web DSKY at http://192.168.4.1/
 I (2300) ili9341: ILI9341 ready: 320x240 landscape
 I (2301) dsky:    display_hal up: 320x240, strip_h=80
-I (2305) cst820:  CST820 ready (sda=33 scl=32 rst=25)
+I (2305) xpt2046: XPT2046 ready (sck=25 mosi=32 miso=39 cs=33 irq=36)
 I (2306) touch:   touch_input task up
 ```
 
