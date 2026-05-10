@@ -31,6 +31,22 @@
 #define ILI_RAMWR     0x2C
 #define ILI_MADCTL    0x36
 #define ILI_PIXFMT    0x3A
+#define ILI_FRMCTR1   0xB1
+#define ILI_DFUNCTR   0xB6
+#define ILI_PWCTR1    0xC0
+#define ILI_PWCTR2    0xC1
+#define ILI_VMCTR1    0xC5
+#define ILI_VMCTR2    0xC7
+#define ILI_GMCTRP1   0xE0
+#define ILI_GMCTRN1   0xE1
+#define ILI_PWCTRA    0xCB
+#define ILI_PWCTRB    0xCF
+#define ILI_TIMCTRA   0xE8
+#define ILI_TIMCTRB   0xEA
+#define ILI_PWRSEQ    0xED
+#define ILI_3GAMMAEN  0xF2
+#define ILI_PUMPRC    0xF7
+#define ILI_GAMMASET  0x26
 
 // MADCTL: MX=1, MV=1, BGR=1 -> 320x240 landscape, BGR order. Matches the
 // witnessmenow CYD reference (third_party/CYD-reference) for the C variant.
@@ -59,13 +75,44 @@ static void spi_tx(const uint8_t *bytes, size_t len)
 static void wcmd(uint8_t cmd)                   { dc_low();  spi_tx(&cmd, 1); }
 static void wdat(const uint8_t *d, size_t n)    { dc_high(); spi_tx(d, n); }
 
+// Full ILI9341 init sequence — power, gamma, frame rate, display function.
+// The minimal SWRESET/SLPOUT/MADCTL/DISPON path "succeeds" at the SPI level
+// but leaves the panel in a low-contrast / dark state on many ILI9341 dies.
+// This is the canonical Adafruit_ILI9341 begin() sequence (which TFT_eSPI,
+// LovyanGFX, and ESP Marauder all use). It reliably brings the CYD panel
+// up to full brightness and contrast.
 static void send_init(void)
 {
     wcmd(ILI_SWRESET); vTaskDelay(pdMS_TO_TICKS(120));
-    wcmd(ILI_SLPOUT);  vTaskDelay(pdMS_TO_TICKS(120));
-    wcmd(ILI_PIXFMT);  wdat((uint8_t[]){0x55}, 1);
-    wcmd(ILI_MADCTL);  wdat((uint8_t[]){MADCTL_LANDSCAPE}, 1);
-    wcmd(ILI_DISPON);  vTaskDelay(pdMS_TO_TICKS(20));
+
+    wcmd(ILI_PWCTRB);   wdat((uint8_t[]){0x00, 0xC1, 0x30}, 3);
+    wcmd(ILI_PWRSEQ);   wdat((uint8_t[]){0x64, 0x03, 0x12, 0x81}, 4);
+    wcmd(ILI_TIMCTRA);  wdat((uint8_t[]){0x85, 0x00, 0x78}, 3);
+    wcmd(ILI_PWCTRA);   wdat((uint8_t[]){0x39, 0x2C, 0x00, 0x34, 0x02}, 5);
+    wcmd(ILI_PUMPRC);   wdat((uint8_t[]){0x20}, 1);
+    wcmd(ILI_TIMCTRB);  wdat((uint8_t[]){0x00, 0x00}, 2);
+
+    wcmd(ILI_PWCTR1);   wdat((uint8_t[]){0x23}, 1);             // VRH[5:0]
+    wcmd(ILI_PWCTR2);   wdat((uint8_t[]){0x10}, 1);             // SAP[2:0]; BT[3:0]
+    wcmd(ILI_VMCTR1);   wdat((uint8_t[]){0x3E, 0x28}, 2);
+    wcmd(ILI_VMCTR2);   wdat((uint8_t[]){0x86}, 1);
+
+    wcmd(ILI_MADCTL);   wdat((uint8_t[]){MADCTL_LANDSCAPE}, 1);
+    wcmd(ILI_PIXFMT);   wdat((uint8_t[]){0x55}, 1);             // RGB565
+    wcmd(ILI_FRMCTR1);  wdat((uint8_t[]){0x00, 0x18}, 2);       // 79 Hz
+    wcmd(ILI_DFUNCTR);  wdat((uint8_t[]){0x08, 0x82, 0x27}, 3);
+
+    wcmd(ILI_3GAMMAEN); wdat((uint8_t[]){0x00}, 1);
+    wcmd(ILI_GAMMASET); wdat((uint8_t[]){0x01}, 1);
+    wcmd(ILI_GMCTRP1);  wdat((uint8_t[]){0x0F, 0x31, 0x2B, 0x0C, 0x0E, 0x08,
+                                         0x4E, 0xF1, 0x37, 0x07, 0x10, 0x03,
+                                         0x0E, 0x09, 0x00}, 15);
+    wcmd(ILI_GMCTRN1);  wdat((uint8_t[]){0x00, 0x0E, 0x14, 0x03, 0x11, 0x07,
+                                         0x31, 0xC1, 0x48, 0x08, 0x0F, 0x0C,
+                                         0x31, 0x36, 0x0F}, 15);
+
+    wcmd(ILI_SLPOUT);   vTaskDelay(pdMS_TO_TICKS(120));
+    wcmd(ILI_DISPON);   vTaskDelay(pdMS_TO_TICKS(20));
 }
 
 static void set_window(int x0, int y0, int x1, int y1)
