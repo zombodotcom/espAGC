@@ -15,6 +15,11 @@
 
 #include "yaAGC.h"
 #include "agc_engine.h"
+#include "dsky_keys.h"
+
+#ifndef CONFIG_AGC_AUTO_RSET_AT_BOOT
+#define CONFIG_AGC_AUTO_RSET_AT_BOOT 1
+#endif
 
 static const char *TAG = "chrouter";
 
@@ -265,7 +270,22 @@ void channel_router_on_routine(void)
     // resolved DSKY state to UART so we can see what the renderer would
     // paint, independent of the LCD itself. Keeps the channel-write log
     // skimmable.
-    if (++g_routine_count % 256 != 0) return;
+    g_routine_count++;
+
+    // (a) Auto-RSET one-shot. After Luminary settles past GOJAM and
+    // peripheral checks, post one synthetic RSET keypress so the
+    // engine's hardware-direct RestartLight clear (agc_engine.c:586)
+    // fires. See docs/superpowers/specs/2026-05-10-prog-alarm-watchdog-design.md.
+#if CONFIG_AGC_AUTO_RSET_AT_BOOT
+    static bool s_did_boot_rset = false;
+    if (!s_did_boot_rset && g_routine_count >= 16) {
+        channel_router_post_key(DSKY_KEY_RSET);
+        s_did_boot_rset = true;
+        ESP_LOGI(TAG, "auto-RSET posted at boot (tick %d)", g_routine_count);
+    }
+#endif
+
+    if (g_routine_count % 256 != 0) return;
 
     char prog[3], verb[3], noun[3];
     char r1[7], r2[7], r3[7];
