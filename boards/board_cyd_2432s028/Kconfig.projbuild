@@ -2,14 +2,14 @@ menu "espAGC CYD board"
 
 config ESPAGC_CYD_LCD_BL_GPIO
     int "LCD backlight GPIO"
-    default 27
+    default 21
     range 0 39
     help
-        GPIO driving the ILI9341 backlight transistor on the CYD-2432S028C.
-        The original C variant uses GPIO27 (BL moved off 21 to free that pin
-        for the CST820 touch INT). Some C revisions still wire BL on GPIO21.
-        If the screen stays dark on boot but `ili9341 ready ...` appears in
-        the log, try toggling this between 27 and 21.
+        GPIO driving the ILI9341 backlight on the CYD. The canonical CYD
+        (witnessmenow PINS.md) wires BL on GPIO21 active-high. Some less
+        common revisions use GPIO27. If the screen stays dark on boot but
+        `ILI9341 ready ...` appears in the log, try toggling this between
+        21 and 27.
 
 config ESPAGC_CYD_LCD_BL_ACTIVE_LOW
     bool "LCD backlight is active-low"
