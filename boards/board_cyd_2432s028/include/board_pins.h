@@ -25,7 +25,14 @@
 #define BOARD_LCD_DC     2
 #define BOARD_LCD_RST    -1      // tied to EN — no GPIO control
 #define BOARD_LCD_BL             CONFIG_ESPAGC_CYD_LCD_BL_GPIO
-#define BOARD_LCD_BL_ACTIVE_LOW  CONFIG_ESPAGC_CYD_LCD_BL_ACTIVE_LOW
+// `bool` Kconfig at default-n leaves CONFIG_…_ACTIVE_LOW undefined rather
+// than =0, so we can't expand it directly into an initializer. Map presence
+// to 1 / absence to 0 here so consumers always get a stable integer.
+#ifdef CONFIG_ESPAGC_CYD_LCD_BL_ACTIVE_LOW
+#define BOARD_LCD_BL_ACTIVE_LOW  1
+#else
+#define BOARD_LCD_BL_ACTIVE_LOW  0
+#endif
 
 // Touch: XPT2046 resistive (SPI on its own bus, VSPI / SPI3_HOST so it
 // doesn't share the LCD bus). Pins per witnessmenow CYD PINS.md.

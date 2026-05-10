@@ -72,30 +72,55 @@ static void draw_text_strip(uint16_t *strip, int x0, int y0_local, const char *s
     }
 }
 
+// Same as draw_text_strip but each font pixel is rendered as a `scale x scale`
+// block, so labels can fill bigger cells (keypad keys are 42x28 px while the
+// native font is 5x7 — at 1x the labels look like flyspecks).
+static void draw_text_strip_scaled(uint16_t *strip, int x0, int y0_local,
+                                   const char *s, uint16_t c, int scale)
+{
+    int x = x0, y = y0_local;
+    for (; *s; s++) {
+        if (*s == '\n') { x = x0; y += (FONT_H + 1) * scale; continue; }
+        const uint8_t *g = font5x7[font_index(*s)];
+        for (int col = 0; col < FONT_W; col++) {
+            uint8_t bits = g[col];
+            for (int row = 0; row < FONT_H; row++) {
+                if (!(bits & (1 << row))) continue;
+                fill_rect_strip(strip, x + col * scale, y + row * scale,
+                                scale, scale, c);
+            }
+        }
+        x += (FONT_W + 1) * scale;
+    }
+}
+
 // --- status panel -----------------------------------------------------
 
 #define SP_W        60
-#define SP_CELL_W   28
+#define SP_CELL_W   29
 #define SP_CELL_H   33
 #define SP_GAP_X     2
 
 typedef struct { int row; const char *text; bool is_yellow; int flag_offset; } sp_cell_t;
 #define FLAG(field) ((int)offsetof(dsky_state_t, field))
 
+// Labels capped at 4 chars per line (24 px @ FONT_W+1=6) so they fit inside
+// the 29-px cell. Abbreviations track common DSKY shorthand:
+//   UPLNK ACTY, NO ATT, KEY REL, OPR ERR, GIMBAL LOCK, RESTART, TRACKER.
 static const sp_cell_t sp_cells[] = {
-    { 0, "UPLINK\nACTY",  false, FLAG(uplink_acty) },
-    { 1, "NO ATT",        false, FLAG(no_att) },
-    { 2, "STBY",          false, FLAG(stby) },
-    { 3, "KEY REL",       false, FLAG(key_rel) },
-    { 4, "OPR ERR",       false, FLAG(opr_err) },
+    { 0, "UPLN\nACTY", false, FLAG(uplink_acty) },
+    { 1, "NO\nATT",    false, FLAG(no_att) },
+    { 2, "STBY",       false, FLAG(stby) },
+    { 3, "KEY\nREL",   false, FLAG(key_rel) },
+    { 4, "OPR\nERR",   false, FLAG(opr_err) },
 
-    { 0, "TEMP",          true,  FLAG(temp) },
-    { 1, "GIMBAL\nLOCK",  true,  FLAG(gimbal_lock) },
-    { 2, "PROG",          true,  FLAG(prog_alarm) },
-    { 3, "RESTART",       true,  FLAG(restart) },
-    { 4, "TRACKER",       true,  FLAG(tracker) },
-    { 5, "ALT",           true,  -1 },
-    { 6, "VEL",           true,  -1 },
+    { 0, "TEMP",       true,  FLAG(temp) },
+    { 1, "GMBL\nLOCK", true,  FLAG(gimbal_lock) },
+    { 2, "PROG",       true,  FLAG(prog_alarm) },
+    { 3, "RSRT",       true,  FLAG(restart) },
+    { 4, "TRKR",       true,  FLAG(tracker) },
+    { 5, "ALT",        true,  -1 },
+    { 6, "VEL",        true,  -1 },
 };
 #define SP_CELL_COUNT (int)(sizeof(sp_cells) / sizeof(sp_cells[0]))
 
@@ -189,9 +214,13 @@ static void render_keypad(uint16_t *strip, int strip_y0)
         int yl = y0 - strip_y0;
         if (yl + h <= 0 || yl >= STRIP_H) continue;
         fill_rect_strip(strip, x0, yl, w, h, COL_PANEL);
-        int lx = x0 + (w - FONT_W) / 2;
-        int ly = y0 + (h - FONT_H) / 2 - strip_y0;
-        draw_text_strip(strip, lx, ly, c->label, COL_AMBER);
+        // Single-char labels at 3x = 15x21 — visible from a foot away,
+        // still leaves ~11 px horizontal and ~3 px vertical padding in
+        // the 38x24 usable cell area.
+        const int scale = 3;
+        int lx = x0 + (w - FONT_W * scale) / 2;
+        int ly = y0 + (h - FONT_H * scale) / 2 - strip_y0;
+        draw_text_strip_scaled(strip, lx, ly, c->label, COL_AMBER, scale);
     }
 }
 

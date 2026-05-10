@@ -46,12 +46,15 @@
 #define ST_MADCTL     0x36
 #define ST_COLMOD     0x3A
 
-// MADCTL: MV=1, MX=1, BGR=0 (RGB on this panel) -> 320x240 landscape.
-// Per witnessmenow CYD2USB User_Setup.h, RGB order is BGR — but the BGR
-// flag in MADCTL bit 3 means "the panel expects BGR data". This panel is
-// wired such that we send BGR; the bit is therefore SET. Adjust if reds
-// look blue or vice versa.
+// MADCTL base for landscape: MV|MX = 0x60. The BGR bit (0x08) is OR'd in
+// only when the panel expects BGR-ordered pixel data, which varies between
+// CYD2USB revisions. Controlled by ESPAGC_CYD_LCD_BGR Kconfig (default n =
+// RGB) — flip in menuconfig if reds and blues come out swapped.
+#ifdef CONFIG_ESPAGC_CYD_LCD_BGR
 #define MADCTL_LANDSCAPE 0x68    // MV(0x20) | MX(0x40) | BGR(0x08)
+#else
+#define MADCTL_LANDSCAPE 0x60    // MV(0x20) | MX(0x40)
+#endif
 
 static const char *TAG = "st7789";
 

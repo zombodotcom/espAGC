@@ -21,4 +21,12 @@ config ESPAGC_CYD_LCD_BL_ACTIVE_LOW
         active-high MOSFET. If toggling the BL GPIO didn't fix a dark
         screen, try toggling this.
 
+config ESPAGC_CYD_LCD_BGR
+    bool "Panel uses BGR pixel order (set if reds and blues are swapped)"
+    default n
+    help
+        Toggles MADCTL bit 3 in the panel driver. CYD2USB ST7789 panels
+        ship in both RGB- and BGR-filtered variants. Default is RGB; flip
+        to y if reds and blues come out swapped on your unit.
+
 endmenu
