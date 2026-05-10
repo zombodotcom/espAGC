@@ -52,11 +52,16 @@ esp_err_t xpt2046_init_with_pins(const xpt2046_pins_t *p)
 {
     s_cfg = *p;
 
-    // Defaults if caller passed zero (caller may pre-fill instead)
-    if (!s_cfg.raw_x_max) s_cfg.raw_x_max = 3900;
-    if (!s_cfg.raw_x_min) s_cfg.raw_x_min = 200;
-    if (!s_cfg.raw_y_max) s_cfg.raw_y_max = 3900;
-    if (!s_cfg.raw_y_min) s_cfg.raw_y_min = 200;
+    // Defaults derived from the consensus of multiple working ESPHome
+    // CYD2USB landscape configs (ESPHome forum + issue #12561 reports):
+    //   x_min:250 x_max:3550 y_min:300 y_max:3750 (most common)
+    //   x_min:208 x_max:3823 y_min:282 y_max:3835
+    //   x_min:220 x_max:3756 y_min:394 y_max:3749
+    // Per-unit variation is real; expect to tune on hardware.
+    if (!s_cfg.raw_x_max) s_cfg.raw_x_max = 3550;
+    if (!s_cfg.raw_x_min) s_cfg.raw_x_min = 250;
+    if (!s_cfg.raw_y_max) s_cfg.raw_y_max = 3750;
+    if (!s_cfg.raw_y_min) s_cfg.raw_y_min = 300;
     if (!s_cfg.panel_w)   s_cfg.panel_w   = 320;
     if (!s_cfg.panel_h)   s_cfg.panel_h   = 240;
 
