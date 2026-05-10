@@ -247,8 +247,11 @@ int channel_router_pump_input(void *agc_state)
     while (g_key_tail != g_key_head) {
         uint8_t code = g_key_ring[g_key_tail % KEY_RING_SZ];
         g_key_tail++;
-        // Channel 015 input: 5-bit keycode. Raise interrupt 5 (KEYRUPT1).
-        state->InputChannel[015] = code & 037;
+        // Channel 015 input: 5-bit keycode. Route through WriteIO so the
+        // engine's RSET-clears-RestartLight side-effect (agc_engine.c:586)
+        // fires; a direct InputChannel[015] = code skips it and the RESTART
+        // lamp stays latched forever. Raise KEYRUPT1 after.
+        WriteIO(state, 015, code & 037);
         state->InterruptRequests[5] = 1;
         return 0;       // process one key per engine call
     }

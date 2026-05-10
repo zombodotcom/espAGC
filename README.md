@@ -8,11 +8,23 @@ The emulator core is yaAGC. License is **GPL v2** (carries through from yaAGC).
 
 | Layer | Status | Notes |
 |---|---|---|
-| Layer 1 — host tests (`tests/host/`) | **4/4 PASS** | ROM loader, engine boot, channel-10 DSKY emit, keypad hit-test |
-| Layer 2 — QEMU | **deferred** | QEMU integration deferred. |
-| Layer 3 — hardware | **boots, runs** | Firmware brings up the ST7789 panel, loads Luminary099, joins WiFi (or falls back to a SoftAP `espAGC`), and accepts taps on the on-screen 19-key keypad. |
+| Layer 1 — pure-logic host tests | **4/4 PASS** | ROM loader, engine boot, channel-10 DSKY emit, keypad hit-test (~1 s) |
+| Layer 2a — engine + real channel_router | **5/5 PASS** | Boot alarm dump, P00 select, lamp test, RSET clears RESTART, Apollo 11 launch transcript replay |
+| Layer 2b — renderer pixel tests | **2/2 PASS** | Blank frame FNV-1a hash, region assertions for lit PROG/VERB/NOUN cells |
+| Layer 3 — QEMU | **deferred** | No QEMU support for ESP32-C5/WROOM in any released QEMU; covered by Layer 2 instead |
+| Layer 4 — hardware | **boots, runs** | Firmware brings up the ST7789 panel, loads Luminary099, joins WiFi (or falls back to a SoftAP `espAGC`), and accepts taps on the on-screen 19-key keypad |
 
 DSKY output renders as a 320×240 framebuffer on the ST7789 panel — status panel, register window, and an on-screen 19-key keypad backed by the XPT2046 resistive touchscreen. No LVGL — direct framebuffer in 80-row strips, three passes per frame.
+
+## Boot behavior — the PROG ALARM caveat
+
+A fresh Luminary 099 boot leaves **PROG ALARM**, **RESTART**, and the **NightWatchman** watchdog all asserted. This is canonical Block II AGC fresh-start behavior — the astronaut is supposed to acknowledge with **RSET**.
+
+After RSET:
+- **RESTART clears.** The hardware-direct flip-flop in `agc_engine.c` (`State->RestartLight = 0` when ch015 is written with keycode 022) fires correctly.
+- **PROG ALARM stays lit.** Luminary's RSET handler (`PINBALL_GAME__BUTTONS_AND_LIGHTS.agc::ERROR`) clears `DSPTAB +11D` *and* the fault bits in `IMODES30`/`IMODES33` — but the comment right there reads *"IF THE FAILURE STILL EXISTS, THE ALARM WILL COME BACK."* Luminary still sees missing peripherals (no IMU CDU counters, no radar data, no AOT marks), re-asserts the fault bits, and re-asserts PROG ALARM.
+
+Solving this end-to-end requires a peripheral stub task — see `docs/SESSION_NOTES.md` for the current investigation and what's next.
 
 ## Layout
 
@@ -21,12 +33,16 @@ components/
   agc_core/          yaAGC engine wrapper. Cherry-picks engine sources
                      from third_party/virtualagc/yaAGC, replaces
                      SocketAPI.c with io_callbacks.c and agc_engine_init.c
-                     with a memory-loading agc_init.c.
+                     with a memory-loading agc_init.c. Initializes ch030
+                     to 036377 ("healthy LM" — IMU operating, LGC in
+                     control, temp within limits).
   apollo_rom/        Runs host yaYUL on virtualagc's Luminary099 / Comanche055
                      mission trees at configure time, embeds the binaries
                      via EMBED_FILES.
   channel_router/    AGC IO channels <-> a dsky_state_t snapshot, with a
-                     lock-free input ringbuffer for keystrokes.
+                     lock-free input ringbuffer for keystrokes. Routes
+                     ch015 keypresses through agc_engine.c::WriteIO so
+                     the RSET-clears-RESTART hardware path fires.
   display_hal/       320x240 DSKY renderer. ST7789 panel driver,
                      dsky_layout_320x240, framebuffer rendered in
                      three 80-row strips.
@@ -35,16 +51,18 @@ components/
   dsky_input/        WiFi (HTTP POST /key) transport feeding channel_router.
   led_status/        3-GPIO RGB LED driver (active-low) for the CYD's
                      onboard status LED.
+  sequences/         Canned DSKY key sequences (lamp test, P00 select,
+                     V16N36 time, V05N09, RSET) exposed via the web UI.
 boards/
   board_cyd_2432s028/  Pin map + factory functions returning panel,
                        touch, and LED ifaces.
 main/                app_main.c — boot sequence + task spawn.
-tests/host/          Layer 1 host gcc tests. ~1 s to run.
+tests/host/          Three-layer host gcc test harness. ~2 s total.
 tools/
   build_yayul.cmake     ExternalProject for host yaYUL.
   yayul_host_project/   Top-level CMakeLists wrapper for yaYUL.
   assemble_rom.cmake    Custom command runner: yaYUL MAIN.agc -> bank-ordered .bin.
-third_party/         Submodules: virtualagc, Apollo-11, CYD-reference.
+third_party/         Submodules: virtualagc, Apollo-11, CYD-reference, T-Dongle-C5.
 ```
 
 ## Build & flash
@@ -79,16 +97,18 @@ Hold the boot button at reset to switch ROM to Comanche055.
 ### DSKY input
 
 - **Touchscreen**: tap the on-screen 19-key keypad. Same key set as the WiFi web UI.
-- **WiFi web UI**: connect to the network configured in `idf.py menuconfig` → espAGC WiFi (or to the open AP `espAGC` if no SSID is set), browse to `http://<dongle-ip>/` (or `http://192.168.4.1/` in SoftAP mode). SPA has a 19-button DSKY keypad and physical-keyboard shortcuts.
+- **WiFi web UI**: connect to the network configured in `idf.py menuconfig` → espAGC WiFi (or to the open AP `espAGC` if no SSID is set), browse to `http://<dongle-ip>/` (or `http://192.168.4.1/` in SoftAP mode). SPA has a 19-button DSKY keypad, physical-keyboard shortcuts, and a one-click menu of canned sequences (lamp test, P00 select, RSET, etc.).
 
-## Layer 1 host tests
+## Host tests
+
+Three layers of host tests run in ~2 seconds total. No hardware required.
 
 ```powershell
 cd tests\host
 mingw32-make run    # gcc must be on PATH
 ```
 
-Four tests, each PASS in well under a second:
+### Layer 1 — pure logic (`-D__embedded__` against yaAGC + agc_init.c + a tiny IO stub)
 
 | Test | What it asserts |
 |---|---|
@@ -97,14 +117,40 @@ Four tests, each PASS in well under a second:
 | `test_channel10_emit` | Engine emits writes to ch010 (DSKY display) + ch011 (status) within 200 000 cycles |
 | `test_keypad_hit` | 320×240 keypad cell centers map to the right `dsky_key_t` codes; out-of-bounds returns -1 |
 
-The Makefile compiles `agc_engine.c` straight from the virtualagc submodule
-plus our `agc_init.c` and a host-side IO stub — no ESP-IDF, no FreeRTOS
-involvement.
+### Layer 2a — engine wired to the *real* channel_router
+
+These compile `components/channel_router/channel_router.c` against host shims (`tests/host/include/freertos/*.h`, `esp_log.h`) so we exercise the actual code path the firmware uses.
+
+| Test | What it asserts |
+|---|---|
+| `test_alarm_at_boot` | Engine survives 5 M cycles after fresh-start; prints the agc_t alarm flags + resolved dsky_state for diagnosis |
+| `test_p00_select` | Boot, RSET, V37E00E — engine reaches a state where COMP ACTY blinks |
+| `test_lamp_test` | Boot, RSET, V35E — flash V/N + indicator lamps light within a window |
+| `test_rset_clears_alarms` | After RSET, `dsky_state.restart` clears (regression guard for the WriteIO routing fix) |
+| `test_replay_apollo11_launch` | Replays `third_party/virtualagc/yaDSKY2/Apollo11-launch.canned` (a yaDSKY2 recording of real Luminary output) directly through `channel_router_on_output`, asserts decoded PROG/VERB/NOUN/COMP ACTY match the launch transcript. Validates the entire decode pipeline against ground truth. |
+
+### Layer 2b — renderer pixel tests
+
+Compile `dsky_render_320x240.c` + `font5x7.c` + `dsky_layout.c` + `dsky_keypad_320x240.c` against host gcc (zero ESP-IDF dependencies past `<string.h>`). Render into an in-memory RGB565 framebuffer and assert.
+
+| Test | What it asserts |
+|---|---|
+| `test_render_blank` | Blank dsky_state renders to a non-empty buffer; FNV-1a hash is stable across builds (drop a font or layout tweak — fail loudly, update the hash deliberately) |
+| `test_render_prog_lit` | After setting PROG=12, VERB=16, NOUN=65, region assertions confirm at least N amber pixels land inside the labelled cell rectangles. Robust to font/spacing tweaks; fails only when a digit literally isn't painted |
+
+### Why this layering
+
+Three-layer pattern adopted from `dosNew/esp-dos/docs/testing.md`:
+- **Layer 1** runs in milliseconds, gates *everything*. Logic correctness only.
+- **Layer 2a** catches integration regressions (the kind of thing where ch010 row-mapping was wrong but every Layer 1 test passed). Replay against the canned Apollo 11 launch transcript is the strongest assertion in the repo — if the decoder is wrong, the replay diverges from ground truth.
+- **Layer 2b** catches "the digit suddenly isn't on the screen anymore" regressions without needing the LCD wired up.
+- **Layer 3 hardware** is reserved for things only hardware can show: backlight wiring, panel orientation, touch calibration, ROM-vs-peripheral interactions Luminary cares about.
 
 ## Dependencies
 
 - ESP-IDF v6.0+
 - MinGW-w64 / gcc / clang on the host (for yaYUL)
+- All third-party code is in `third_party/` as submodules — `git submodule update --init --recursive` if you didn't `--recurse-submodules` at clone time.
 
 ## License
 

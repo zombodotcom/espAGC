@@ -63,7 +63,27 @@ static void init_cpu_state(agc_t *State)
 {
     // Clear i/o channels.
     for (int i = 0; i < NUM_CHANNELS; i++) State->InputChannel[i] = 0;
-    State->InputChannel[030] = 037777;
+
+    // Channels 30-33: per Luminary099/INPUT_OUTPUT_CHANNEL_BIT_DESCRIPTIONS.agc,
+    // these are LM hardware-status inputs and "ALL BITS … ARE INVERTED AS
+    // SENSED BY THE PROGRAM, SO A VALUE OF ZERO MEANS THE INDICATED SIGNAL
+    // IS PRESENT." Stock yaAGC initialises ch30 to 0o37777 — every signal
+    // de-asserted — which means *no IMU healthy*, *AGS in control*, *no
+    // PIPA freshness*, etc. Luminary then perpetually re-asserts a
+    // peripheral-fault PROG caution every 1.28 s of refresh.
+    //
+    // We instead start in a "healthy LM with IMU operating, LGC in
+    // control, temp within limits" state by *clearing* the matching
+    // signal-present bits:
+    //   ch30 bit 9  (IMU OPERATE WITH NO MALFUNCTION)        -> 0 = signal present
+    //   ch30 bit 10 (LM COMPUTER (NOT AGS) HAS CONTROL)      -> 0 = LGC in control
+    //   ch30 bit 15 (TEMP STABLE MEMBER WITHIN DESIGN LIMITS)-> 0 = temp OK
+    // Other bits stay 1 (signal NOT present = no fault / no command).
+    //
+    //   bits 1..8   -> 0o0377
+    //   bits 11..14 -> 0o36000
+    //   total mask  -> 0o36377
+    State->InputChannel[030] = 036377;
     State->InputChannel[031] = 077777;
     State->InputChannel[032] = 077777;
     State->InputChannel[033] = 077777;
