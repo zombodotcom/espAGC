@@ -15,29 +15,6 @@
 
 #include "yaAGC.h"
 #include "agc_engine.h"
-#include "dsky_keys.h"
-
-#ifndef CONFIG_AGC_AUTO_RSET_AT_BOOT
-#define CONFIG_AGC_AUTO_RSET_AT_BOOT 1
-#endif
-
-// Forward declaration of agc_core_state() so we can call it from the routine
-// hook without dragging in agc_core.h (which pulls FreeRTOS headers on device).
-extern agc_t *agc_core_state(void);
-
-// Peripheral channel baselines (see agc_init.c::init_cpu_state for derivation).
-// Restoring these every tick keeps Luminary's T4JOB from seeing fault bits and
-// triggering the alarm loop. See docs/superpowers/specs/2026-05-10-prog-alarm-watchdog-design.md.
-#define PSTUB_CH030_BASELINE  036377u   // healthy LM: IMU operating, LGC control, temp OK
-#define PSTUB_CH033_BASELINE  077777u   // no AGC warning, no PIPA fail, no oscillator fail
-// IMODES30 @ octal 01302: Erasable[2][0302]; fresh-start value per T4RUPT_PROGRAM.agc line 273
-// IMODES33 @ octal 01303: Erasable[2][0303]; fresh-start value per T4RUPT_PROGRAM.agc line 527
-#define PSTUB_IMODES30_BANK   2
-#define PSTUB_IMODES30_OFF    0302
-#define PSTUB_IMODES30_FRESH  037411u
-#define PSTUB_IMODES33_BANK   2
-#define PSTUB_IMODES33_OFF    0303
-#define PSTUB_IMODES33_FRESH  016000u
 
 static const char *TAG = "chrouter";
 
@@ -288,58 +265,7 @@ void channel_router_on_routine(void)
     // resolved DSKY state to UART so we can see what the renderer would
     // paint, independent of the LCD itself. Keeps the channel-write log
     // skimmable.
-
-    // (b) Peripheral watchdog — runs every tick. Restores the peripheral
-    // channel inputs and IMODES erasable mirrors so Luminary's T4JOB sees
-    // a healthy LM on every mode-switch cycle, preventing the peripheral-
-    // fault alarm loop from re-arming. See peripheral_stub component
-    // (Tasks 4-7) for the full component version of this logic.
-    // This inline copy runs in host tests before peripheral_stub is wired.
-    //
-    // Also clears engine alarm state (WarningFilter, GeneratedWarning,
-    // RestartLight) so the GOJAM feedback loop cannot perpetuate itself
-    // between ticks. Without this, Luminary sees fault bits in IMODES,
-    // fires ALARM → GOJAM → RestartLight=1 faster than the 8192-cycle
-    // tick can restore the baseline.
-    {
-        agc_t *st = agc_core_state();
-        if (st != NULL) {
-            st->InputChannel[030] = PSTUB_CH030_BASELINE;
-            st->InputChannel[033] = PSTUB_CH033_BASELINE;
-            st->Erasable[PSTUB_IMODES30_BANK][PSTUB_IMODES30_OFF] = PSTUB_IMODES30_FRESH;
-            st->Erasable[PSTUB_IMODES33_BANK][PSTUB_IMODES33_OFF] = PSTUB_IMODES33_FRESH;
-            st->WarningFilter         = 0;
-            st->GeneratedWarning      = 0;
-            // Clear hardware watchdog states so TriggeredAlarm stays 0.
-            // The NightWatchman and TC-trap checks fire at SCALER1 boundaries
-            // (~32768 cycles apart). If we reset these flags every tick
-            // (~8192 cycles), we service the watchdog faster than it can fire.
-            st->NightWatchman         = 0;
-            st->NightWatchmanTripped  = 0;
-            st->RuptLock              = 0;
-            st->TCTrap                = 0;
-            st->NoTC                  = 0;
-        }
-    }
-
-    g_routine_count++;
-
-    // (a) Auto-RSET one-shot. After Luminary settles past GOJAM and
-    // peripheral checks, post one synthetic RSET keypress so the
-    // engine's hardware-direct RestartLight clear (agc_engine.c:586)
-    // fires. Combined with peripheral_stub keeping IMODES* fault bits
-    // clear, this keeps PROG ALARM extinguished at idle. See
-    // docs/superpowers/specs/2026-05-10-prog-alarm-watchdog-design.md.
-#if CONFIG_AGC_AUTO_RSET_AT_BOOT
-    static bool s_did_boot_rset = false;
-    if (!s_did_boot_rset && g_routine_count >= 50) {
-        channel_router_post_key(DSKY_KEY_RSET);
-        s_did_boot_rset = true;
-        ESP_LOGI(TAG, "auto-RSET posted at boot (tick %d)", g_routine_count);
-    }
-#endif
-
-    if (g_routine_count % 256 != 0) return;
+    if (++g_routine_count % 256 != 0) return;
 
     char prog[3], verb[3], noun[3];
     char r1[7], r2[7], r3[7];
@@ -364,6 +290,7 @@ void channel_router_on_routine(void)
     // why the digit display stays blank. Per Layer-2 host tests
     // (tests/host/test_alarm_at_boot), our Luminary099 boot trips
     // NightWatchman + WarningFilter very early and stays there.
+    extern agc_t *agc_core_state(void);
     agc_t *st = agc_core_state();
     // CycleCounter is a `uint64_t` declared in the engine but its bit
     // layout depends on `__embedded__` and packing; printing the low 32
