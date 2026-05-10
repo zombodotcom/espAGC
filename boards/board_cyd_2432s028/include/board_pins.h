@@ -13,7 +13,8 @@
 
 #define BOARD_NAME "CYD-2432S028"
 
-// LCD: ILI9341, 240x320 native; rotated to 320x240 landscape via MADCTL.
+// LCD: ST7789 on the CYD2USB revision (ILI9341 on the older single-USB CYD).
+// 240x320 native; rotated to 320x240 landscape via MADCTL.
 // Lives on HSPI / SPI2_HOST (the LCD pins 14/13/12/15 are HSPI's defaults).
 #define BOARD_LCD_HRES   320
 #define BOARD_LCD_VRES   240

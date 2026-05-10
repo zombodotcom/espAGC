@@ -1,6 +1,6 @@
 // boards/board_cyd_2432s028/board_init.c
 #include "board_pins.h"
-#include "ili9341_panel.h"
+#include "st7789_panel.h"
 #include "xpt2046.h"
 #include "rgb_gpio.h"
 #include "driver/gpio.h"
@@ -9,7 +9,7 @@
 
 static const char *TAG = "board";
 
-static const ili9341_pins_t s_lcd_pins = {
+static const st7789_pins_t s_lcd_pins = {
     .sck            = BOARD_LCD_SCK,
     .mosi           = BOARD_LCD_MOSI,
     .miso           = BOARD_LCD_MISO,
@@ -20,14 +20,14 @@ static const ili9341_pins_t s_lcd_pins = {
     .bl_active_low  = BOARD_LCD_BL_ACTIVE_LOW,
 };
 
-static esp_err_t cyd_panel_init(void) { return ili9341_init(&s_lcd_pins); }
+static esp_err_t cyd_panel_init(void) { return st7789_init(&s_lcd_pins); }
 
 static const display_panel_iface_t s_panel = {
     .width      = BOARD_LCD_HRES,
     .height     = BOARD_LCD_VRES,
     .swap_bytes = true,
     .init       = cyd_panel_init,
-    .draw_rows  = ili9341_draw_rows,
+    .draw_rows  = st7789_draw_rows,
 };
 
 static esp_err_t cyd_touch_init(void)

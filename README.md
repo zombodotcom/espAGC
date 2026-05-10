@@ -10,9 +10,9 @@ The emulator core is yaAGC. License is **GPL v2** (carries through from yaAGC).
 |---|---|---|
 | Layer 1 — host tests (`tests/host/`) | **4/4 PASS** | ROM loader, engine boot, channel-10 DSKY emit, keypad hit-test |
 | Layer 2 — QEMU | **deferred** | QEMU integration deferred. |
-| Layer 3 — hardware | **boots, runs** | Firmware brings up the ILI9341 panel, loads Luminary099, joins WiFi (or falls back to a SoftAP `espAGC`), and accepts taps on the on-screen 19-key keypad. |
+| Layer 3 — hardware | **boots, runs** | Firmware brings up the ST7789 panel, loads Luminary099, joins WiFi (or falls back to a SoftAP `espAGC`), and accepts taps on the on-screen 19-key keypad. |
 
-DSKY output renders as a 320×240 framebuffer on the ILI9341 panel — status panel, register window, and an on-screen 19-key keypad backed by the XPT2046 resistive touchscreen. No LVGL — direct framebuffer in 80-row strips, three passes per frame.
+DSKY output renders as a 320×240 framebuffer on the ST7789 panel — status panel, register window, and an on-screen 19-key keypad backed by the XPT2046 resistive touchscreen. No LVGL — direct framebuffer in 80-row strips, three passes per frame.
 
 ## Layout
 
@@ -27,7 +27,7 @@ components/
                      via EMBED_FILES.
   channel_router/    AGC IO channels <-> a dsky_state_t snapshot, with a
                      lock-free input ringbuffer for keystrokes.
-  display_hal/       320x240 DSKY renderer. ILI9341 panel driver,
+  display_hal/       320x240 DSKY renderer. ST7789 panel driver,
                      dsky_layout_320x240, framebuffer rendered in
                      three 80-row strips.
   touch_input/       XPT2046 resistive driver + 50 Hz poll task that
@@ -68,7 +68,7 @@ On boot you'll see something like:
 ```
 I (1507) app: loading ROM Luminary099 (73728 bytes)
 I (2227) wifi_input: WiFi AP 'espAGC' up; web DSKY at http://192.168.4.1/
-I (2300) ili9341: ILI9341 ready: 320x240 landscape
+I (2300) st7789: ST7789 ready: 320x240 landscape
 I (2301) dsky:    display_hal up: 320x240, strip_h=80
 I (2305) xpt2046: XPT2046 ready (sck=25 mosi=32 miso=39 cs=33 irq=36)
 I (2306) touch:   touch_input task up

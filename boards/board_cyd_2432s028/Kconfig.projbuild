@@ -5,10 +5,10 @@ config ESPAGC_CYD_LCD_BL_GPIO
     default 21
     range 0 39
     help
-        GPIO driving the ILI9341 backlight on the CYD. The canonical CYD
+        GPIO driving the LCD backlight on the CYD. The canonical CYD
         (witnessmenow PINS.md) wires BL on GPIO21 active-high. Some less
         common revisions use GPIO27. If the screen stays dark on boot but
-        `ILI9341 ready ...` appears in the log, try toggling this between
+        `ST7789 ready ...` appears in the log, try toggling this between
         21 and 27.
 
 config ESPAGC_CYD_LCD_BL_ACTIVE_LOW

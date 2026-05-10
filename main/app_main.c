@@ -81,7 +81,7 @@ void app_main(void)
     }
 
     channel_router_init();
-    display_hal_init();   // brings up the ILI9341 panel + 320x240 layout
+    display_hal_init();   // brings up the ST7789 panel + 320x240 layout
 
     apollo_rom_id_t rom_id = pick_rom();
     size_t rom_size = 0;
