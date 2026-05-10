@@ -29,6 +29,7 @@ YAAGC     := $(ROOT)/third_party/virtualagc/yaAGC
 AGC_CORE  := $(ROOT)/components/agc_core
 DISP_HAL  := $(ROOT)/components/display_hal
 CH_ROUTER := $(ROOT)/components/channel_router
+PSTUB     := $(ROOT)/components/peripheral_stub
 ROM       := $(ROOT)/build/roms/Luminary099.bin
 
 INC     := -I$(YAAGC) -I$(AGC_CORE)/include -I.
@@ -43,18 +44,19 @@ HOST_STUBS   := test_io_stub.c
 
 # Layer 2 build: real channel_router + io_callbacks compiled with shims.
 HARNESS_INC  := -I$(YAAGC) -I$(AGC_CORE)/include -I$(CH_ROUTER)/include \
-                -Iinclude -I.
+                -I$(PSTUB)/include -Iinclude -I.
 HARNESS_SRCS := \
     $(ENGINE_SRCS) \
     $(INIT_SRCS) \
     $(AGC_CORE)/io_callbacks.c \
     $(CH_ROUTER)/channel_router.c \
+    $(PSTUB)/peripheral_stub.c \
     agc_harness.c
 
 LAYER1_TESTS := test_rom_load test_engine_boot test_channel10_emit
 LAYER2_TESTS := test_alarm_at_boot test_p00_select test_lamp_test \
                 test_rset_clears_alarms test_replay_apollo11_launch \
-                test_auto_rset_at_boot
+                test_auto_rset_at_boot test_peripheral_stub_clears_imodes
 RENDER_TESTS := test_render_blank test_render_prog_lit
 
 TESTS := $(LAYER1_TESTS) test_keypad_hit $(LAYER2_TESTS) $(RENDER_TESTS)
