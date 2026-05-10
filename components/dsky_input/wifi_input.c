@@ -11,8 +11,10 @@
 
 #include "channel_router.h"
 #include "dsky_input.h"
+#include "sequences.h"
 
 #include <string.h>
+#include <stdio.h>
 
 #include "esp_event.h"
 #include "esp_http_server.h"
@@ -53,16 +55,57 @@ static esp_err_t handle_key(httpd_req_t *req)
     return httpd_resp_sendstr(req, "ok");
 }
 
+// GET /seqs -> JSON list of available canned sequences:
+//   [{"i":0,"name":"...","desc":"..."}, ...]
+static esp_err_t handle_seqs(httpd_req_t *req)
+{
+    char buf[1024];
+    int  off = 0;
+    off += snprintf(buf + off, sizeof(buf) - off, "[");
+    for (int i = 0; i < sequences_count(); i++) {
+        const sequence_t *s = sequences_get(i);
+        off += snprintf(buf + off, sizeof(buf) - off,
+                        "%s{\"i\":%d,\"name\":\"%s\",\"desc\":\"%s\"}",
+                        i ? "," : "", i, s->name, s->description);
+    }
+    off += snprintf(buf + off, sizeof(buf) - off, "]");
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, buf, off);
+}
+
+// POST /seq -> body is the integer index of the sequence to run.
+static esp_err_t handle_seq(httpd_req_t *req)
+{
+    char buf[16];
+    int recv = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (recv <= 0) { httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "no body"); return ESP_FAIL; }
+    buf[recv] = 0;
+    int idx = atoi(buf);
+    int rc  = sequences_run(idx);
+    if (rc == 0)  return httpd_resp_sendstr(req, "ok");
+    if (rc == -2) {
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_set_type(req, "text/plain");
+        return httpd_resp_sendstr(req, "another sequence is still running");
+    }
+    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad index");
+    return ESP_FAIL;
+}
+
 static void start_http(void)
 {
     httpd_handle_t server = NULL;
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.lru_purge_enable = true;
     ESP_ERROR_CHECK(httpd_start(&server, &cfg));
-    httpd_uri_t root = { .uri = "/",   .method = HTTP_GET,  .handler = handle_index };
-    httpd_uri_t key  = { .uri = "/key",.method = HTTP_POST, .handler = handle_key   };
+    httpd_uri_t root = { .uri = "/",     .method = HTTP_GET,  .handler = handle_index };
+    httpd_uri_t key  = { .uri = "/key",  .method = HTTP_POST, .handler = handle_key   };
+    httpd_uri_t seqs = { .uri = "/seqs", .method = HTTP_GET,  .handler = handle_seqs  };
+    httpd_uri_t seq  = { .uri = "/seq",  .method = HTTP_POST, .handler = handle_seq   };
     httpd_register_uri_handler(server, &root);
     httpd_register_uri_handler(server, &key);
+    httpd_register_uri_handler(server, &seqs);
+    httpd_register_uri_handler(server, &seq);
 }
 
 // ---- STA path ----------------------------------------------------------

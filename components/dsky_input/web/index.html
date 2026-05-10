@@ -5,36 +5,51 @@
 <style>
   :root { color-scheme: dark; }
   body  { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-          background:#000; color:#eee; margin:0; padding:1rem; }
+          background:#000; color:#eee; margin:0; padding:1rem;
+          max-width: 22rem; }
   h1    { font-size:1rem; margin:0 0 .8rem; color:#FFB000; }
+  h2    { font-size:.8rem; margin:1rem 0 .4rem; color:#FFB000;
+          text-transform: uppercase; letter-spacing: .1em; }
   .pad  { display:grid; grid-template-columns:repeat(3, 4rem); gap:.5rem; }
-  button{ font:inherit; padding:.6rem; background:#222; color:#FFB000;
-          border:1px solid #444; border-radius:.4rem; cursor:pointer; }
-  button:active { background:#444; }
-  .verb,.noun,.entr,.pro,.rset,.clr,.krel { background:#332600; color:#FFD060; }
+  .seqs { display:flex; flex-direction:column; gap:.3rem; }
+  button.key { font:inherit; padding:.6rem; background:#222; color:#FFB000;
+               border:1px solid #444; border-radius:.4rem; cursor:pointer; }
+  button.key:active { background:#444; }
+  button.verb,button.noun,button.entr,button.pro,
+  button.rset,button.clr,button.krel { background:#332600; color:#FFD060; }
+  button.seq { font:inherit; padding:.5rem .7rem; background:#101820;
+               color:#9ec5e8; border:1px solid #2a4055; border-radius:.4rem;
+               text-align:left; cursor:pointer; font-size:.85rem; }
+  button.seq:hover  { background:#15222e; }
+  button.seq:active { background:#1f2f3e; }
+  button.seq small  { display:block; opacity:.6; font-size:.75rem; margin-top:.15rem; }
   .log  { margin-top:1rem; font-size:.8rem; opacity:.6; max-height:6rem; overflow:auto; }
 </style>
 
 <h1>espAGC — virtual DSKY</h1>
 
+<h2>Keypad</h2>
 <div class="pad">
-  <button class="verb"  data-key="VRB">VERB</button>
-  <button class="noun"  data-key="NUN">NOUN</button>
-  <button class="rset"  data-key="RSET">RSET</button>
+  <button class="key verb"  data-key="VRB">VERB</button>
+  <button class="key noun"  data-key="NUN">NOUN</button>
+  <button class="key rset"  data-key="RSET">RSET</button>
 
-  <button data-key="7">7</button><button data-key="8">8</button><button data-key="9">9</button>
-  <button data-key="4">4</button><button data-key="5">5</button><button data-key="6">6</button>
-  <button data-key="1">1</button><button data-key="2">2</button><button data-key="3">3</button>
+  <button class="key" data-key="7">7</button><button class="key" data-key="8">8</button><button class="key" data-key="9">9</button>
+  <button class="key" data-key="4">4</button><button class="key" data-key="5">5</button><button class="key" data-key="6">6</button>
+  <button class="key" data-key="1">1</button><button class="key" data-key="2">2</button><button class="key" data-key="3">3</button>
 
-  <button class="clr"   data-key="CLR">CLR</button>
-  <button data-key="0">0</button>
-  <button class="entr"  data-key="ENTR">ENTR</button>
+  <button class="key clr"   data-key="CLR">CLR</button>
+  <button class="key" data-key="0">0</button>
+  <button class="key entr"  data-key="ENTR">ENTR</button>
 
-  <button data-key="+">+</button><button data-key="-">-</button>
-  <button class="pro"   data-key="PRO">PRO</button>
+  <button class="key" data-key="+">+</button><button class="key" data-key="-">-</button>
+  <button class="key pro"   data-key="PRO">PRO</button>
 
-  <button class="krel"  data-key="KREL">KEY&nbsp;REL</button>
+  <button class="key krel"  data-key="KREL">KEY&nbsp;REL</button>
 </div>
+
+<h2>Canned sequences</h2>
+<div class="seqs" id="seqs">loading…</div>
 
 <pre class="log" id="log"></pre>
 
@@ -43,12 +58,20 @@
     const el = document.getElementById('log');
     el.textContent = (m + '\n' + el.textContent).slice(0, 2000);
   };
-  const send = (k) =>
+  const sendKey = (k) =>
     fetch('/key', { method: 'POST', body: k })
       .then(r => log((r.ok ? '→ ' : 'X ') + k))
       .catch(e => log('err: ' + e));
-  document.querySelectorAll('button').forEach(b => {
-    b.addEventListener('click', () => send(b.dataset.key));
+  const runSeq = (i, name) =>
+    fetch('/seq', { method: 'POST', body: String(i) })
+      .then(async r => {
+        if (r.ok) log('▶ ' + name);
+        else      log('X ' + name + ' (' + r.status + ' ' + (await r.text()) + ')');
+      })
+      .catch(e => log('err: ' + e));
+
+  document.querySelectorAll('button.key').forEach(b => {
+    b.addEventListener('click', () => sendKey(b.dataset.key));
   });
   addEventListener('keydown', (e) => {
     const map = {
@@ -57,6 +80,20 @@
       r:'RSET', R:'RSET', k:'KREL', K:'KREL',
     };
     const tok = map[e.key] ?? (/^[0-9+\-]$/.test(e.key) ? e.key : null);
-    if (tok) send(tok);
+    if (tok) sendKey(tok);
+  });
+
+  fetch('/seqs').then(r => r.json()).then(list => {
+    const root = document.getElementById('seqs');
+    root.innerHTML = '';
+    list.forEach(s => {
+      const b = document.createElement('button');
+      b.className = 'seq';
+      b.innerHTML = s.name + '<small>' + s.desc + '</small>';
+      b.addEventListener('click', () => runSeq(s.i, s.name));
+      root.appendChild(b);
+    });
+  }).catch(e => {
+    document.getElementById('seqs').textContent = 'failed to load: ' + e;
   });
 </script>
