@@ -42,6 +42,13 @@ int dsky_keypad_320x240_hit(int x, int y)
     if (y < DSKY_KP_Y0 || y >= DSKY_KP_Y1) return -1;
     int col = (x - DSKY_KP_X0) / DSKY_KP_CW;
     int row = (y - DSKY_KP_Y0) / DSKY_KP_CH;
+    // The XPT2046 driver's map_range() clamps reported X to panel_w-1 = 319,
+    // and (319 - DSKY_KP_X0) / DSKY_KP_CW = 6 — one past the rightmost valid
+    // column. Pin col/row inside the table so taps in the bottom-right
+    // sliver (RSET, ENTR) actually land on their cells instead of falling
+    // through to "no hit".
+    if (col >= DSKY_KP_COLS) col = DSKY_KP_COLS - 1;
+    if (row >= DSKY_KP_ROWS) row = DSKY_KP_ROWS - 1;
     for (int i = 0; i < dsky_kp_cells_320x240_count; i++) {
         if (dsky_kp_cells_320x240[i].col == col &&
             dsky_kp_cells_320x240[i].row == row)

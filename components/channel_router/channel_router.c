@@ -121,28 +121,54 @@ static void apply_row(int row, int payload)
              r3_sign_bits = (r3_sign_bits & ~1) | (sign_bit ? 1 : 0);
              g_snapshot.r3_sign = resolve_sign(r3_sign_bits); break;
 
-    case 12: g_snapshot.flash_verb_noun = (payload & 0x20) != 0; break;
+    case 12:
+        // ch10 row 12 = "flag word". Per yaDSKY2/yaDSKY2.cpp Inds[] (lines
+        // 181-211) several caution lights are latched here in addition to
+        // the verb/noun flash bit. Direct assignment so the AGC's
+        // explicit-clear actually clears the indicator.
+        //   bit 0x008 (010 octal) : NO ATT
+        //   bit 0x020 (040 octal) : flash V/N (also surfaces on ch011 040)
+        //   bit 0x040 (0100 oct)  : GIMBAL LOCK
+        //   bit 0x080 (0200 oct)  : TRACKER
+        //   bit 0x100 (0400 oct)  : PROG ALARM
+        g_snapshot.no_att          = (payload & 0x008) != 0;
+        g_snapshot.flash_verb_noun = (payload & 0x020) != 0;
+        g_snapshot.gimbal_lock     = (payload & 0x040) != 0;
+        g_snapshot.tracker         = (payload & 0x080) != 0;
+        g_snapshot.prog_alarm      = (payload & 0x100) != 0;
+        break;
     default: break;
     }
     mark_dirty();
 }
 
+// Channel 011 indicator bits per yaDSKY2 Inds[]:
+//   0x002 (02 oct)  : COMP ACTY (green dot)
+//   0x004 (04 oct)  : UPLINK ACTY
+//   0x008 (010 oct) : TEMP
+//   0x040 (040 oct) : flash VERB/NOUN
 static void apply_ch11(int payload)
 {
-    // Subset of channel 011 status lights.
-    g_snapshot.comp_acty   = (payload & (1 <<  1)) != 0;
-    g_snapshot.uplink_acty = (payload & (1 <<  2)) != 0;
-    g_snapshot.temp        = (payload & (1 <<  3)) != 0;
-    g_snapshot.key_rel     = (payload & (1 <<  4)) != 0;
-    g_snapshot.flash_verb_noun |= (payload & (1 << 5)) != 0;
-    g_snapshot.opr_err     = (payload & (1 <<  6)) != 0;
+    g_snapshot.comp_acty   = (payload & 0x002) != 0;
+    g_snapshot.uplink_acty = (payload & 0x004) != 0;
+    g_snapshot.temp        = (payload & 0x008) != 0;
+    // ch11 040 also drives the V/N flash; keep latched along with the
+    // ch10-row-12 source so either one lights it.
+    if (payload & 0x040) g_snapshot.flash_verb_noun = true;
     mark_dirty();
 }
 
+// Channel 0163 (LM-only block-II caution and warning):
+//   0x010 (020 oct)  : KEY REL
+//   0x040 (0100 oct) : OPR ERR
+//   0x080 (0200 oct) : RESTART
+//   0x100 (0400 oct) : STBY
 static void apply_ch163(int payload)
 {
-    g_snapshot.restart = (payload & (1 << 1)) != 0;
-    g_snapshot.stby    = (payload & (1 << 4)) != 0;
+    g_snapshot.key_rel = (payload & 0x010) != 0;
+    g_snapshot.opr_err = (payload & 0x040) != 0;
+    g_snapshot.restart = (payload & 0x080) != 0;
+    g_snapshot.stby    = (payload & 0x100) != 0;
     mark_dirty();
 }
 
@@ -159,9 +185,37 @@ void channel_router_init(void)
     if (g_mutex == NULL) g_mutex = xSemaphoreCreateMutex();
 }
 
+// Diagnostic: log the first N writes per channel after boot so we can see
+// on the UART whether the AGC is actually emitting digit-row updates in
+// response to keypresses. Once the steady-state cadence is understood we
+// can tighten this further; for now it's the only way to disambiguate
+// "engine isn't echoing" from "renderer not picking up state".
+#define DIAG_LOG_LIMIT 200
+static int g_diag_log_count = 0;
+static int g_last_logged_ch = -1;
+static int g_last_logged_value = -1;
+
+static void diag_log(int channel, int value)
+{
+    if (g_diag_log_count >= DIAG_LOG_LIMIT) return;
+    if (channel == g_last_logged_ch && value == g_last_logged_value) return;
+    g_last_logged_ch = channel;
+    g_last_logged_value = value;
+    if (channel == 010) {
+        int row = (value >> 11) & 0x0F;
+        int payload = value & 0x07FF;
+        ESP_LOGI(TAG, "ch010 row=%2d payload=%04o (%d/%d hex %03x)",
+                 row, payload, (payload >> 5) & 0x1F, payload & 0x1F, payload);
+    } else {
+        ESP_LOGI(TAG, "ch%03o value=%05o (hex %04x)", channel, value, value);
+    }
+    g_diag_log_count++;
+}
+
 void channel_router_on_output(int channel, int value)
 {
     if (g_mutex == NULL) return;
+    diag_log(channel, value);
     xSemaphoreTake(g_mutex, portMAX_DELAY);
     switch (channel) {
     case 010: {

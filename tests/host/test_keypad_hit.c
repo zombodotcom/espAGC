@@ -43,6 +43,14 @@ int main(void)
     assert(dsky_keypad_320x240_hit(64, 99) == -1);
     assert(dsky_keypad_320x240_hit(320, 240) == -1);
 
+    // Bottom-right corner-of-panel taps must reach the rightmost column.
+    // XPT2046's map_range() clamps reported X to 319 (panel_w-1) and
+    // Y to 239, so without the col/row clamp the user can never tap
+    // RSET or ENTR. (See the channel_router/touch fix in the bring-up
+    // plan.)
+    assert(dsky_keypad_320x240_hit(319, 239) == DSKY_KEY_RSET);
+    assert(dsky_keypad_320x240_hit(319, 200) == DSKY_KEY_ENTR);
+
     printf("test_keypad_hit OK\n");
     return 0;
 }
