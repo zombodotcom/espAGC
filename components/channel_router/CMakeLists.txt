@@ -3,6 +3,7 @@ idf_component_register(
     INCLUDE_DIRS "include"
     PRIV_INCLUDE_DIRS "${CMAKE_CURRENT_LIST_DIR}/../../third_party/virtualagc/yaAGC"
     REQUIRES     freertos
+    PRIV_REQUIRES peripheral_stub
 )
 
 # Match agc_core's __embedded__ flag so the engine header parses the same way

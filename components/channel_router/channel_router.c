@@ -16,10 +16,13 @@
 #include "yaAGC.h"
 #include "agc_engine.h"
 #include "dsky_keys.h"
+#include "peripheral_stub.h"
 
 #ifndef CONFIG_AGC_AUTO_RSET_AT_BOOT
 #define CONFIG_AGC_AUTO_RSET_AT_BOOT 1
 #endif
+
+extern agc_t *agc_core_state(void);
 
 static const char *TAG = "chrouter";
 
@@ -265,6 +268,8 @@ int channel_router_pump_input(void *agc_state)
 
 void channel_router_on_routine(void)
 {
+    peripheral_stub_tick(agc_core_state());
+
     // The engine calls this once per ChannelRoutineCount tick (~every 02000
     // engine cycles). About every 256 calls (~5 s wall-time) dump the
     // resolved DSKY state to UART so we can see what the renderer would
@@ -310,7 +315,6 @@ void channel_router_on_routine(void)
     // why the digit display stays blank. Per Layer-2 host tests
     // (tests/host/test_alarm_at_boot), our Luminary099 boot trips
     // NightWatchman + WarningFilter very early and stays there.
-    extern agc_t *agc_core_state(void);
     agc_t *st = agc_core_state();
     // CycleCounter is a `uint64_t` declared in the engine but its bit
     // layout depends on `__embedded__` and packing; printing the low 32
