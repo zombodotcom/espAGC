@@ -1,0 +1,13 @@
+menu "espAGC PROG ALARM watchdog"
+
+config AGC_AUTO_RSET_AT_BOOT
+    bool "Send a synthetic RSET ~5 s after boot to flush PROG ALARM"
+    default y
+    help
+        Posts one DSKY_KEY_RSET keycode to channel 015 once the engine
+        has run ~50 ChannelRoutine ticks (about 5 s wall-time). Used
+        together with the peripheral_stub watchdog to keep the PROG
+        ALARM lamp clear at idle. Disable to observe raw alarm
+        behavior for debugging the underlying peripheral state.
+
+endmenu
