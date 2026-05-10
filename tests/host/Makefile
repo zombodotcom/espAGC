@@ -57,7 +57,7 @@ LAYER1_TESTS := test_rom_load test_engine_boot test_channel10_emit
 LAYER2_TESTS := test_alarm_at_boot test_p00_select test_lamp_test \
                 test_rset_clears_alarms test_replay_apollo11_launch \
                 test_auto_rset_at_boot test_peripheral_stub_clears_imodes \
-                test_failreg_diagnostic
+                test_failreg_diagnostic test_lm_idle_quiet
 RENDER_TESTS := test_render_blank test_render_prog_lit
 
 TESTS := $(LAYER1_TESTS) test_keypad_hit $(LAYER2_TESTS) $(RENDER_TESTS)

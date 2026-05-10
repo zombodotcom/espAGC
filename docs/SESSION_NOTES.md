@@ -112,3 +112,26 @@ Both `test_rset_clears_alarms` and `test_failreg_diagnostic` show `prog_alarm=1`
 **Implication for the LM_Simulator plan**: the proposed CDU/IMU/radar simulator (Path A) would solve problems that aren't firing. The real bug is in the keypress → KEYRUPT1 → ERROR path. Likely candidates: interrupt index wrong (it's 5, matches Luminary's lead-in vector — already verified), `AllowInterrupt` is 0 during the auto-RSET fire, or our `channel_router_pump_input` has a race with engine state.
 
 Plan pivoted: investigate why ERROR isn't running before building any simulator infrastructure.
+
+### KEYRUPT1 trace finding
+
+Wrote `tests/host/test_keyrupt_trace.c` (not in CI list; standalone diagnostic). Single-steps for 30,000 cycles after manually posting RSET, dumps `AllowInterrupt`, `InIsr`, `InterruptRequests[5]`, `InputChannel[015]`, `FAILREG[0]`, `DSPTAB+11D`, `DSPLOCK`, `RegZ` on every state change.
+
+Result: **KEYRUPT1 fires** (RegZ jumps to `04024` at cycle 1, AGC's KEYRUPT1 vector) and **exits cleanly** at cycle 192. But `DSPLOCK` (erasable `01012`, bank 2 offset `012`) never transitions 0→1 over 30,000 subsequent cycles. CHARIN's first instruction (`PINBALL_GAME__BUTTONS_AND_LIGHTS.agc:475-477`) is `CAF ONE; XCH DSPLOCK; TS 21/22REG` which sets DSPLOCK = 1. **CHARIN never runs.**
+
+The chain is: keypress → ch015=022 → KEYRUPT1 fires → reads MNKEYIN → stores keycode in RUPTREG4/KEYTEMP1 → `CAF CHRPRIO; TC NOVAC; 2CADR CHARIN` schedules CHARIN as a NEW JOB → RESUME exits interrupt → executive should pick up CHARIN. Last step is what's broken. Either NOVAC quietly fails, the VAC area is corrupt after the post-NW-trip GOJAM, or the executive's job queue is in a state we don't understand.
+
+### Resolution (2026-05-10) — host-side ERROR
+
+Rather than block on the deeper investigation (KEYRUPT1 → CHARIN dispatch needs a yaAGC executive walkthrough), `peripheral_stub_tick()` now does what the real `ERROR` routine does (PINBALL `3744-3801`), from outside the engine, **but only when `FAILREG[0] == 01107`** (NIGHT WATCHMAN):
+
+- Clear `DSPTAB+11D` bit 9, preserving bits 4 (NO ATT) and 6 (GIMBAL LOCK), set bit 15 (request) — matches `CAF GL+NOATT; MASK DSPTAB+11D; AD BIT15; TS DSPTAB+11D`.
+- Zero `FAILREG[0..2]` — matches `CAF ZERO; TS FAILREG; TS FAILREG +1; TS FAILREG +2`.
+
+Any other `FAILREG[0]` value is left alone — real alarms remain visible. Verified by:
+- `tests/host/test_peripheral_stub_clears_imodes` (3 parts: no alarm → don't touch DSPTAB; NW alarm → clear and zero FAILREG; non-NW alarm → leave both alone).
+- `tests/host/test_lm_idle_quiet` (5M-cycle contract test; PROG ALARM clears within 2M cycles of boot and stays clear).
+
+Full suite: **15/15 PASS**. The original `auto-RSET` one-shot remains active; it still clears the engine's hardware-direct `RestartLight` flag (different from `DSPTAB+11D` bit 9) and is harmless.
+
+Known follow-up: the KEYRUPT1 → CHARIN dispatch bug means **manual RSET via the web UI also won't clear PROG ALARM via the AGC's own path**. The host-side ERROR catches the boot-time NW transient automatically, so for users this looks identical to a properly-functioning RSET. But if a real future alarm fires (anything other than 01107), the user pressing RSET on the web UI won't clear it — they'll just have to wait for whichever alarm condition fires next time, or we need to make our host-side ERROR more aggressive about catching all RSET keypresses. Both options are noted but not implemented; revisit when a real alarm is observed.
