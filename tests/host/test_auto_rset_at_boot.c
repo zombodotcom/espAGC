@@ -3,37 +3,40 @@
 // boot. This is option (a) from docs/superpowers/specs/2026-05-10-
 // prog-alarm-watchdog-design.md: the initial flush that clears PROG
 // ALARM's latch via the engine's hardware-direct RSET path.
+//
+// The RSET-cleared RestartLight state is transient — Luminary's
+// GOJAM re-asserts within ~1000 cycles because peripheral state is
+// still missing (option b's job, in Tasks 4-7). So we poll in fine
+// batches and accept any single observation of restart=0 as proof
+// the auto-RSET fired and routed through WriteIO(ch015, RSET).
 
 #include "agc_harness.h"
 #include "test_helpers.h"
 
-#include "yaAGC.h"
-#include "agc_engine.h"
-
 #include <stdio.h>
-
-extern agc_t *agc_core_state(void);
 
 int main(void)
 {
     harness_boot();
 
-    // Step the engine long enough that channel_router_on_routine() has
-    // been called >= 50 times. The engine calls ChannelRoutine every
-    // 02000 cycles, so 50 * 02000 = 100000 cycles is the floor. Add a
-    // ~5x margin and post-RSET consume room.
-    harness_step(500000);
+    // Run past the auto-RSET threshold (tick 50 = ~100k cycles), then
+    // poll in 500-cycle batches looking for the brief restart=0 window.
+    // The empirical window is ~1000 cycles wide before Luminary's
+    // GOJAM re-asserts, so 500-cycle granularity reliably catches it.
+    harness_step(120000);
 
-    // After auto-RSET fires, RSET keycode (18) should have been routed
-    // through WriteIO(015, ...) — which clears RestartLight in the
-    // engine. We assert restart lamp is clear as the observable side
-    // effect.
-    dsky_state_t s;
-    harness_snapshot(&s);
-    printf("post-boot: restart=%d prog_alarm=%d\n", s.restart, s.prog_alarm);
+    for (int i = 0; i < 200; i++) {
+        dsky_state_t s;
+        harness_snapshot(&s);
+        if (!s.restart) {
+            printf("restart=0 observed at +%d cycles after threshold "
+                   "(prog_alarm=%d) — auto-RSET fired correctly\n",
+                   i * 500, s.prog_alarm);
+            PASS();
+        }
+        harness_step(500);
+    }
 
-    ASSERT(!s.restart,
-        "auto-RSET should have flushed RestartLight via WriteIO(ch015, RSET)");
-
-    PASS();
+    ASSERT(0, "restart never cleared in 100k cycles after threshold — "
+              "auto-RSET did not fire (or did not route through WriteIO)");
 }
