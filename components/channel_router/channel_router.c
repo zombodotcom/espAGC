@@ -185,32 +185,42 @@ void channel_router_init(void)
     if (g_mutex == NULL) g_mutex = xSemaphoreCreateMutex();
 }
 
-// Diagnostic: log the first N writes per channel after boot so we can see
-// on the UART whether the AGC is actually emitting digit-row updates in
-// response to keypresses. Once the steady-state cadence is understood we
-// can tighten this further; for now it's the only way to disambiguate
-// "engine isn't echoing" from "renderer not picking up state".
-#define DIAG_LOG_LIMIT 200
-static int g_diag_log_count = 0;
-static int g_last_logged_ch = -1;
-static int g_last_logged_value = -1;
+// Diagnostic: log only channel-10 digit-row writes (rows 1..11) and the
+// row-12 flag word. No count cap — we want to see post-tap echoes for as
+// long as the user runs the firmware. Skips the high-volume telemetry
+// channels (ch034/ch035 downlink, ch005/ch006 gyro counters) and the
+// constant ch010 row=0 zero-relay refreshes.
+static int g_last_ch10_row = -1;
+static int g_last_ch10_payload = -1;
+static int g_last_ch11 = -1;
+static int g_last_ch163 = -1;
 
 static void diag_log(int channel, int value)
 {
-    if (g_diag_log_count >= DIAG_LOG_LIMIT) return;
-    if (channel == g_last_logged_ch && value == g_last_logged_value) return;
-    g_last_logged_ch = channel;
-    g_last_logged_value = value;
     if (channel == 010) {
         int row = (value >> 11) & 0x0F;
         int payload = value & 0x07FF;
-        ESP_LOGI(TAG, "ch010 row=%2d payload=%04o (%d/%d hex %03x)",
-                 row, payload, (payload >> 5) & 0x1F, payload & 0x1F, payload);
-    } else {
-        ESP_LOGI(TAG, "ch%03o value=%05o (hex %04x)", channel, value, value);
+        if (row == 0 && payload == 0) return;        // skip the zero-relay spam
+        if (row == g_last_ch10_row && payload == g_last_ch10_payload) return;
+        g_last_ch10_row = row;
+        g_last_ch10_payload = payload;
+        ESP_LOGI(TAG, "ch010 row=%2d payload=%04o (left=%2d right=%2d)",
+                 row, payload, (payload >> 5) & 0x1F, payload & 0x1F);
+    } else if (channel == 011) {
+        if (value == g_last_ch11) return;
+        g_last_ch11 = value;
+        ESP_LOGI(TAG, "ch011 value=%05o", value);
+    } else if (channel == 0163) {
+        if (value == g_last_ch163) return;
+        g_last_ch163 = value;
+        ESP_LOGI(TAG, "ch0163 value=%05o", value);
     }
-    g_diag_log_count++;
+    // everything else (ch034/ch035 telemetry, gyro, etc.) is silent.
 }
+
+// Periodic snapshot dump so we can see the resolved DSKY state without
+// staring at raw channel writes. Called from channel_router_routine().
+static int g_routine_count = 0;
 
 void channel_router_on_output(int channel, int value)
 {
@@ -245,7 +255,33 @@ int channel_router_pump_input(void *agc_state)
     return 0;
 }
 
-void channel_router_on_routine(void) { /* nothing scheduled yet */ }
+void channel_router_on_routine(void)
+{
+    // The engine calls this once per ChannelRoutineCount tick (~every 02000
+    // engine cycles). About every 256 calls (~5 s wall-time) dump the
+    // resolved DSKY state to UART so we can see what the renderer would
+    // paint, independent of the LCD itself. Keeps the channel-write log
+    // skimmable.
+    if (++g_routine_count % 256 != 0) return;
+
+    char prog[3], verb[3], noun[3];
+    char r1[7], r2[7], r3[7];
+    #define DC(d) ((d) < 0 ? '_' : (char)('0' + (d)))
+    #define SC(s) ((s) == DSKY_SIGN_PLUS ? '+' : (s) == DSKY_SIGN_MINUS ? '-' : ' ')
+    prog[0]=DC(g_snapshot.prog[0]); prog[1]=DC(g_snapshot.prog[1]); prog[2]=0;
+    verb[0]=DC(g_snapshot.verb[0]); verb[1]=DC(g_snapshot.verb[1]); verb[2]=0;
+    noun[0]=DC(g_snapshot.noun[0]); noun[1]=DC(g_snapshot.noun[1]); noun[2]=0;
+    r1[0]=SC(g_snapshot.r1_sign); for(int i=0;i<5;i++) r1[1+i]=DC(g_snapshot.r1[i]); r1[6]=0;
+    r2[0]=SC(g_snapshot.r2_sign); for(int i=0;i<5;i++) r2[1+i]=DC(g_snapshot.r2[i]); r2[6]=0;
+    r3[0]=SC(g_snapshot.r3_sign); for(int i=0;i<5;i++) r3[1+i]=DC(g_snapshot.r3[i]); r3[6]=0;
+    #undef DC
+    #undef SC
+    ESP_LOGI(TAG, "snap PRG=%s VRB=%s NUN=%s R1=%s R2=%s R3=%s "
+                  "ca=%d up=%d pa=%d oe=%d",
+             prog, verb, noun, r1, r2, r3,
+             g_snapshot.comp_acty, g_snapshot.uplink_acty,
+             g_snapshot.prog_alarm, g_snapshot.opr_err);
+}
 
 void channel_router_post_key(int code)
 {
