@@ -29,4 +29,14 @@ config ESPAGC_CYD_LCD_BGR
         ship in both RGB- and BGR-filtered variants. Default is RGB; flip
         to y if reds and blues come out swapped on your unit.
 
+config ESPAGC_CYD_LCD_INVERT
+    bool "Send INVON during panel init (set if colors look correct only when inverted)"
+    default n
+    help
+        ST7789 panels disagree about the polarity of their pixel data: most
+        in this CYD line look right WITHOUT INVON (default). Symptom of
+        wrong choice: green looks pink/magenta, white looks blue, an empty
+        framebuffer is light not dark. Toggle and reflash if that's what
+        you see.
+
 endmenu

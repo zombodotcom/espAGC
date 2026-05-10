@@ -83,7 +83,11 @@ static void send_init(void)
     wcmd(ST_SLPOUT);   vTaskDelay(pdMS_TO_TICKS(120));
     wcmd(ST_COLMOD);   wdat((uint8_t[]){0x55}, 1);          // RGB565
     wcmd(ST_MADCTL);   wdat((uint8_t[]){MADCTL_LANDSCAPE}, 1);
-    wcmd(ST_INVON);    vTaskDelay(pdMS_TO_TICKS(10));       // critical for ST7789
+#ifdef CONFIG_ESPAGC_CYD_LCD_INVERT
+    wcmd(ST_INVON);    vTaskDelay(pdMS_TO_TICKS(10));
+#else
+    wcmd(ST_INVOFF);   vTaskDelay(pdMS_TO_TICKS(10));
+#endif
     wcmd(ST_NORON);    vTaskDelay(pdMS_TO_TICKS(10));
     wcmd(ST_DISPON);   vTaskDelay(pdMS_TO_TICKS(120));
 }
