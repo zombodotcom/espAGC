@@ -18,6 +18,10 @@
 #define DSKY_KEY_MINUS   27
 #define DSKY_KEY_ENTR    28
 #define DSKY_KEY_CLR     30
-#define DSKY_KEY_PRO     25
-#define DSKY_KEY_KEYREL  25   /* shares with PRO on some panels — kept distinct */
+// PRO is NOT a regular ch015 keycode — yaDSKY2 sends it via OutputPro()
+// which writes bit 0x4000 of InputChannel[032] (clear-while-held). For now
+// we alias it to a sentinel so callers can distinguish, and the input
+// transports map it to a no-op until we wire ch032 properly.
+#define DSKY_KEY_PRO     63   /* sentinel — handled specially, not a ch015 code */
+#define DSKY_KEY_KEYREL  25   /* canonical KEY REL ch015 keycode */
 #define DSKY_KEY_RSET    18

@@ -281,6 +281,25 @@ void channel_router_on_routine(void)
              prog, verb, noun, r1, r2, r3,
              g_snapshot.comp_acty, g_snapshot.uplink_acty,
              g_snapshot.prog_alarm, g_snapshot.opr_err);
+
+    // Read agc_engine internal watchdog flags directly. If any of these
+    // are non-zero post-boot, the engine entered an alarm state which is
+    // why the digit display stays blank. Per Layer-2 host tests
+    // (tests/host/test_alarm_at_boot), our Luminary099 boot trips
+    // NightWatchman + WarningFilter very early and stays there.
+    extern agc_t *agc_core_state(void);
+    agc_t *st = agc_core_state();
+    // CycleCounter is a `uint64_t` declared in the engine but its bit
+    // layout depends on `__embedded__` and packing; printing the low 32
+    // bits avoids junk on platforms where the cast is unstable.
+    uint32_t cyc_lo = (uint32_t)(st->CycleCounter & 0xFFFFFFFFu);
+    ESP_LOGI(TAG, "alarms RuptLock=%d NW=%d TC=%d NoTC=%d PF=%d WF=%d GW=%d  "
+                  "RegZ=%05o cyc_lo=%u",
+             (int)st->RuptLock, (int)st->NightWatchmanTripped,
+             (int)st->TCTrap, (int)st->NoTC, (int)st->ParityFail,
+             (int)st->WarningFilter, (int)st->GeneratedWarning,
+             (unsigned)st->Erasable[0][RegZ],
+             (unsigned)cyc_lo);
 }
 
 void channel_router_post_key(int code)
