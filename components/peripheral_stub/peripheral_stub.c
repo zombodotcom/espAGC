@@ -9,9 +9,10 @@
 // IMODES33 @ 01303. yaAGC's agc_t::Erasable[8][0400] indexes by
 // (addr / 0400, addr % 0400) -> bank 2, offsets 0302 / 0303.
 //
-// Fresh-start values come from T4RUPT_PROGRAM.agc comments:
-//   IMODES30 = 037411 (line 273)
-//   IMODES33 = 016000 (line 527)
+// Fresh-start values come from FRESH_START_AND_RESTART.agc lines 152-154:
+//   IMODES30 = 037411 (= IM30INIT per T4RUPT_PROGRAM.agc line 273)
+//   IMODES33 = 016040 (= IM33INIT + BIT6 = 016000 + 040; BIT6 clears DAP/
+//   error-needles display until ICDU zero is finished)
 //
 // Channel baselines match agc_init.c::init_cpu_state():
 //   ch030 = 036377 (healthy LM)
@@ -26,7 +27,7 @@
 #define IMODES30_FRESH   037411
 #define IMODES33_BANK    2
 #define IMODES33_OFFSET  0303
-#define IMODES33_FRESH   016000
+#define IMODES33_FRESH   016040
 
 void peripheral_stub_init(void)
 {

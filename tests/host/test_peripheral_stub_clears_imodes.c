@@ -19,7 +19,7 @@ extern agc_t *agc_core_state(void);
 #define CH030_BASELINE   036377
 #define CH033_BASELINE   077777
 #define IMODES30_FRESH   037411
-#define IMODES33_FRESH   016000
+#define IMODES33_FRESH   016040
 #define IMODES30_BANK    2
 #define IMODES30_OFFSET  0302
 #define IMODES33_BANK    2

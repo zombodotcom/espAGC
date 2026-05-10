@@ -1,5 +1,5 @@
 // test_auto_rset_at_boot — verifies that the channel_router posts a
-// synthetic DSKY_KEY_RSET keypress after ~50 ChannelRoutine ticks at
+// synthetic DSKY_KEY_RSET keypress after ~16 ChannelRoutine ticks at
 // boot. This is option (a) from docs/superpowers/specs/2026-05-10-
 // prog-alarm-watchdog-design.md: the initial flush that clears PROG
 // ALARM's latch via the engine's hardware-direct RSET path.
@@ -19,7 +19,7 @@ int main(void)
 {
     harness_boot();
 
-    // Run past the auto-RSET threshold (tick 50 = ~100k cycles), then
+    // Run past the auto-RSET threshold (tick 16 = ~131k cycles), then
     // poll in 500-cycle batches looking for the brief restart=0 window.
     // The empirical window is ~1000 cycles wide before Luminary's
     // GOJAM re-asserts, so 500-cycle granularity reliably catches it.

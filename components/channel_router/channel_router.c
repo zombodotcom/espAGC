@@ -191,6 +191,7 @@ void channel_router_init(void)
     g_snapshot.noun[0] = g_snapshot.noun[1] = DSKY_BLANK;
 
     if (g_mutex == NULL) g_mutex = xSemaphoreCreateMutex();
+    peripheral_stub_init();
 }
 
 // Diagnostic: log only channel-10 digit-row writes (rows 1..11) and the
