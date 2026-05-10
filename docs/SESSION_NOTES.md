@@ -135,3 +135,23 @@ Any other `FAILREG[0]` value is left alone — real alarms remain visible. Verif
 Full suite: **15/15 PASS**. The original `auto-RSET` one-shot remains active; it still clears the engine's hardware-direct `RestartLight` flag (different from `DSPTAB+11D` bit 9) and is harmless.
 
 Known follow-up: the KEYRUPT1 → CHARIN dispatch bug means **manual RSET via the web UI also won't clear PROG ALARM via the AGC's own path**. The host-side ERROR catches the boot-time NW transient automatically, so for users this looks identical to a properly-functioning RSET. But if a real future alarm fires (anything other than 01107), the user pressing RSET on the web UI won't clear it — they'll just have to wait for whichever alarm condition fires next time, or we need to make our host-side ERROR more aggressive about catching all RSET keypresses. Both options are noted but not implemented; revisit when a real alarm is observed.
+
+### Why no keypress works (V35E, V37E00E, anything)
+
+Same root cause as above but with much wider impact than originally surfaced. Added `tests/host/test_executive_state.c` which dumps `PRIORITY[0..6]` (12-word stride at erasable `0167`), `NEWJOB`, `LOC`, `FIXLOC` plus engine internals across multiple snapshots after a keypress.
+
+Findings:
+
+- **CHARIN IS being scheduled correctly.** Post-NW-trip and post-keypress, `PRIORITY[1] = 030110` octal — that's `CHRPRIO + FAKEPRET offset` (CHARIN). `NEWJOB = 000014` points to slot 1.
+- **CHARIN is NOT being dispatched** because slot 0 has a job at priority `027110` octal that is currently running. The AGC executive only switches jobs at yield points (`ENDOFJOB`, `JOBSLEEP`, `CHANG1/2`). Slot-0's job never yields.
+- **Slot-0's job is stuck in an interpretive GOTO loop.** `RegZ` bounces between `06647..06674` octal across 122,000 engine cycles. Those addresses are the AGC interpreter's `GOTO` / `GOTO+1` dispatcher in fixed-fixed memory (see yaYUL listing for `GOTO` at offset `6646`). The instruction `TCF GOTO+1` at `6674` is the "arbitrary indirectness" inner loop — if the GOTO target chain points to itself or has corrupt data, this loops forever.
+- Slot-0's `LOC = 002056`. Without knowing the FBANK at execution time we cannot pin down exactly which Luminary subroutine this is, but it is interpretive code (the GOTO loop confirms).
+
+Tried preempting the boot-time NIGHT WATCHMAN trip from outside by clearing `State->NightWatchman` every tick in `peripheral_stub_tick`. Result: FAILREG stayed clean (the watchdog never tripped) but slot-0 still got stuck in the same interpretive GOTO loop. So the NW trip is not the cause of the stuck job — it's a symptom of the same underlying problem (slot 0 takes too long to yield, so NEWJOB doesn't get accessed in time). Reverted the NW preemption; it didn't help and added noise.
+
+The real fix requires:
+1. Identifying which Luminary subroutine is the slot-0 job (priority `027110 - FAKEPRET`, likely an IMU monitoring / DAP idler / DSKY refresh task started by the post-`FRESH-START` initialization).
+2. Determining what peripheral state or erasable cell it's polling that we don't provide.
+3. Either supplying that state (real LM_Simulator territory) or short-circuiting the loop.
+
+This is the same root issue the upstream PI/Linux ports solve by running LM_Simulator alongside yaAGC. Until then, the host-side ERROR keeps the boot PROG ALARM lamp clear, but **no DSKY keypress actually reaches Luminary**. The web UI buttons are no-ops.
