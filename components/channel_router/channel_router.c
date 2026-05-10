@@ -48,47 +48,79 @@ static volatile uint16_t g_key_tail;     // consumer (engine task)
 
 static dsky_digit_t decode_digit(int code5)
 {
-    // AGC 5-bit illuminated digit code → 0..9 or blank.
-    static const int8_t map[32] = {
-        [0]  = DSKY_BLANK, // dark
-        [21] = 0, [3] = 1, [25] = 2, [27] = 3,
-        [15] = 4, [30] = 5, [28] = 6, [19] = 7,
-        [29] = 8, [31] = 9,
-    };
-    int8_t v = (code5 >= 0 && code5 < 32) ? map[code5] : (int8_t)DSKY_BLANK;
-    return v ? v : (code5 == 21 ? (dsky_digit_t)0 : v);
+    // AGC 5-bit illuminated digit code -> 0..9 or blank. Same table the
+    // canonical yaDSKY2 uses (SevenSegmentFilenames[]). Anything outside
+    // this set renders blank.
+    switch (code5) {
+        case 21: return 0;   case  3: return 1;   case 25: return 2;
+        case 27: return 3;   case 15: return 4;   case 30: return 5;
+        case 28: return 6;   case 19: return 7;   case 29: return 8;
+        case 31: return 9;
+        default: return DSKY_BLANK;
+    }
 }
 
-static void mark_dirty(void)
+static void mark_dirty(void) { g_snapshot.generation++; }
+
+// Per-register sign latches. AGC ch10 sends + and - bits in two separate
+// row payloads per register; we merge them and let the renderer decide.
+static uint8_t r1_sign_bits, r2_sign_bits, r3_sign_bits;  // bit0=minus, bit1=plus
+
+static dsky_sign_t resolve_sign(uint8_t bits)
 {
-    g_snapshot.generation++;
+    if (bits & 2) return DSKY_SIGN_PLUS;     // + has priority if both set
+    if (bits & 1) return DSKY_SIGN_MINUS;
+    return DSKY_SIGN_NONE;
 }
 
 static void apply_row(int row, int payload)
 {
-    int hi = (payload >> 5) & 0x1F;     // high digit
-    int lo = (payload >> 0) & 0x1F;     // low digit
-    bool plus  = (payload & (1 << 10)) != 0;
-    bool minus = (payload & (1 << 11)) != 0;
+    // yaDSKY2 reference: yaDSKY2/yaDSKY2.cpp ~line 1953 onward. The relay
+    // row index encoded in bits 14..11 of channel-10 maps to specific DSKY
+    // fields below. The "left" digit lives in payload bits 9..5, "right"
+    // in bits 4..0; bit 10 carries the sign for rows that have one.
+    int left  = (payload >> 5) & 0x1F;
+    int right = (payload >> 0) & 0x1F;
+    bool sign_bit = (payload & (1 << 10)) != 0;
 
     switch (row) {
-    case 1: g_snapshot.prog[0] = decode_digit(hi); g_snapshot.prog[1] = decode_digit(lo); break;
-    case 2: g_snapshot.verb[0] = decode_digit(hi); g_snapshot.verb[1] = decode_digit(lo); break;
-    case 3: g_snapshot.noun[0] = decode_digit(hi); g_snapshot.noun[1] = decode_digit(lo); break;
-    case 4: g_snapshot.r3[4] = decode_digit(lo);
-            g_snapshot.r3_sign = plus ? DSKY_SIGN_PLUS : (minus ? DSKY_SIGN_MINUS : DSKY_SIGN_NONE);
-            break;
-    case 5: g_snapshot.r3[2] = decode_digit(hi); g_snapshot.r3[3] = decode_digit(lo); break;
-    case 6: g_snapshot.r3[0] = decode_digit(hi); g_snapshot.r3[1] = decode_digit(lo); break;
-    case 7: g_snapshot.r2[3] = decode_digit(hi); g_snapshot.r2[4] = decode_digit(lo); break;
-    case 8: g_snapshot.r2[1] = decode_digit(hi); g_snapshot.r2[2] = decode_digit(lo); break;
-    case 9: g_snapshot.r1[4] = decode_digit(hi); g_snapshot.r2[0] = decode_digit(lo);
-            g_snapshot.r2_sign = plus ? DSKY_SIGN_PLUS : (minus ? DSKY_SIGN_MINUS : DSKY_SIGN_NONE);
-            break;
-    case 10: g_snapshot.r1[2] = decode_digit(hi); g_snapshot.r1[3] = decode_digit(lo); break;
-    case 11: g_snapshot.r1[0] = decode_digit(hi); g_snapshot.r1[1] = decode_digit(lo);
-             g_snapshot.r1_sign = plus ? DSKY_SIGN_PLUS : (minus ? DSKY_SIGN_MINUS : DSKY_SIGN_NONE);
-             break;
+    case 11: g_snapshot.prog[0] = decode_digit(left);
+             g_snapshot.prog[1] = decode_digit(right); break;
+    case 10: g_snapshot.verb[0] = decode_digit(left);
+             g_snapshot.verb[1] = decode_digit(right); break;
+    case  9: g_snapshot.noun[0] = decode_digit(left);
+             g_snapshot.noun[1] = decode_digit(right); break;
+
+    case  8: g_snapshot.r1[0] = decode_digit(right); break;             // R1D1 only
+    case  7: g_snapshot.r1[1] = decode_digit(left);                      // R1D2,R1D3,+
+             g_snapshot.r1[2] = decode_digit(right);
+             r1_sign_bits = (r1_sign_bits & ~2) | (sign_bit ? 2 : 0);
+             g_snapshot.r1_sign = resolve_sign(r1_sign_bits); break;
+    case  6: g_snapshot.r1[3] = decode_digit(left);                      // R1D4,R1D5,-
+             g_snapshot.r1[4] = decode_digit(right);
+             r1_sign_bits = (r1_sign_bits & ~1) | (sign_bit ? 1 : 0);
+             g_snapshot.r1_sign = resolve_sign(r1_sign_bits); break;
+
+    case  5: g_snapshot.r2[0] = decode_digit(left);                      // R2D1,R2D2,+
+             g_snapshot.r2[1] = decode_digit(right);
+             r2_sign_bits = (r2_sign_bits & ~2) | (sign_bit ? 2 : 0);
+             g_snapshot.r2_sign = resolve_sign(r2_sign_bits); break;
+    case  4: g_snapshot.r2[2] = decode_digit(left);                      // R2D3,R2D4,-
+             g_snapshot.r2[3] = decode_digit(right);
+             r2_sign_bits = (r2_sign_bits & ~1) | (sign_bit ? 1 : 0);
+             g_snapshot.r2_sign = resolve_sign(r2_sign_bits); break;
+
+    case  3: g_snapshot.r2[4] = decode_digit(left);                      // R2D5, R3D1
+             g_snapshot.r3[0] = decode_digit(right); break;
+    case  2: g_snapshot.r3[1] = decode_digit(left);                      // R3D2,R3D3,+
+             g_snapshot.r3[2] = decode_digit(right);
+             r3_sign_bits = (r3_sign_bits & ~2) | (sign_bit ? 2 : 0);
+             g_snapshot.r3_sign = resolve_sign(r3_sign_bits); break;
+    case  1: g_snapshot.r3[3] = decode_digit(left);                      // R3D4,R3D5,-
+             g_snapshot.r3[4] = decode_digit(right);
+             r3_sign_bits = (r3_sign_bits & ~1) | (sign_bit ? 1 : 0);
+             g_snapshot.r3_sign = resolve_sign(r3_sign_bits); break;
+
     case 12: g_snapshot.flash_verb_noun = (payload & 0x20) != 0; break;
     default: break;
     }
