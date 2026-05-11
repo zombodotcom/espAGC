@@ -20,8 +20,13 @@ static void dump(const char *tag, agc_t *st)
     int dsplock  = st->Erasable[2][012] & 077777;
     int s0_prio  = st->Erasable[0][0167] & 077777;
     int s1_prio  = st->Erasable[0][0203] & 077777;
-    printf("%-25s VERBREG=%05o DSPCOUNT=%05o DSPLOCK=%05o s0=%05o s1=%05o\n",
-           tag, verbreg, dspcount, dsplock, s0_prio, s1_prio);
+    int dapbools = st->Erasable[0][0111] & 077777;
+    // MASS = address 01244 -> Erasable[2][0244]. Per /tmp/luminary.lst
+    // TS MASS opcode 55244 -> Address10 = 1244 = bank 2 offset 244.
+    int mass     = st->Erasable[2][0244] & 077777;
+    printf("%-25s VRB=%05o DSPC=%05o LCK=%05o s0=%05o s1=%05o DAP=%05o ACCSOKAY=%d MASS=%05o\n",
+           tag, verbreg, dspcount, dsplock, s0_prio, s1_prio,
+           dapbools, (dapbools & 4) ? 1 : 0, mass);
 }
 
 int main(void)

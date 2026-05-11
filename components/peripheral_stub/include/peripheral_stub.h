@@ -34,6 +34,12 @@ void peripheral_stub_init(void);
 void peripheral_stub_step(agc_t *state, uint32_t dt_us);
 void peripheral_stub_tick(agc_t *state);
 
+// Observe AGC's output-channel writes. Called from channel_router_on_output.
+// LM_Simulator's process_data in lm_simulator.tcl uses ch005/ch006 to detect
+// RCS jet firings and update simulated attitude rates; ch012 bit 5 zeros the
+// IMU.
+void peripheral_stub_on_output(int channel, int value);
+
 #ifdef __cplusplus
 }
 #endif

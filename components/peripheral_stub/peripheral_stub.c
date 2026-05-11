@@ -80,8 +80,96 @@
 // Step accounting: tracks total simulated time and pulse-emission cadence.
 // Reset by peripheral_stub_init.
 static uint64_t g_step_time_us = 0;
-static uint32_t g_pulse_phase  = 0;  // increments every step, drives the
-                                     // CDU pulse cadence (Increment B).
+static uint32_t g_pulse_phase  = 0;  // increments every step.
+
+// --- LM attitude state (Increment C) ------------------------------------
+// Modelled on lm_simulator.tcl's IMU state. All angles in milli-degrees
+// (integer math, no FPU on ESP32 worth depending on). 360 deg = 360000.
+//
+// jet_quad tracks 16 RCS jet enable bits decoded from ch005/ch006 (see
+// lm_simulator.tcl AGC_Outputs.tcl process_data for the exact bit map).
+// nv/nu/np are net jet counts per axis (yaw/pitch/roll in LM body frame)
+// derived from jet_quad via the same lookup LM_Simulator uses.
+//
+// On each step:
+//   1. Decode latest jet_quad → net torque per body axis.
+//   2. Integrate body rates by jet acceleration * dt.
+//   3. Integrate stable-member angles by body rate * dt (skip the full
+//      body-to-stable transform for now — small-angle approximation, the
+//      AGC doesn't care about precise dynamics as long as ICDU pulses
+//      arrive at sensible rates).
+//   4. Compute delta between integrated angle and last-pushed angle.
+//   5. Push PCDU/MCDU pulses to bring AGC's CDU counter up to the
+//      integrated angle.
+//
+// The KEY DIFFERENCE from blindly streaming pulses: when the spacecraft
+// is at rest with no jets firing, angles don't change, no pulses are
+// pushed. Luminary's IMUMON (T4RUPT bank 6) doesn't see phantom CDU
+// motion and doesn't loop on bit-change scans.
+#define MDEG_PER_DEG       1000
+#define MDEG_FULL_CIRCLE   (360 * MDEG_PER_DEG)
+// One PCDU pulse advances the AGC's CDU counter by one increment. The
+// AGC scales CDUX/Y/Z as PI radians / 2^14 — i.e. one increment is
+// 180/16384 = 0.01099 degrees ≈ 11 milli-degrees. Round to 11 for the
+// pulse threshold so we push roughly one pulse per 11 mdeg of motion.
+#define MDEG_PER_CDU_PULSE 11
+
+// Net jet acceleration in milli-deg per sec per sec, taken from
+// dynamic_simulation in AGC_Simulation_Monitor_Control.tcl using the
+// Apollo 11 ascent-stage LM_Weight default. The Tcl computes
+// Alpha_Yaw = b + a/(m + c) in radians/sec/sec; for the LM ascent at
+// ~4700 kg, that works out to ~13.5 deg/sec/sec per jet pair. Use a
+// conservative 8 deg/sec/sec scaled to milli-deg.
+#define JET_ACCEL_MDEG_PER_S2  8000
+
+static int32_t g_att_x_mdeg = 0, g_att_y_mdeg = 0, g_att_z_mdeg = 0;
+static int32_t g_pimu_x_mdeg = 0, g_pimu_y_mdeg = 0, g_pimu_z_mdeg = 0;
+static int32_t g_rate_x_mdeg_s = 0, g_rate_y_mdeg_s = 0, g_rate_z_mdeg_s = 0;
+static uint16_t g_ch005 = 0, g_ch006 = 0;
+static int g_zero_imu = 0;
+
+// Decode ch005/ch006 into net jet count per body axis. lm_simulator.tcl
+// process_data lines 813-820 do the same thing.
+static void decode_jets(int *nv, int *nu, int *np)
+{
+    // ch005 bits 1-8: Q4U Q4D Q3U Q3D Q2U Q2D Q1U Q1D
+    int q4u = (g_ch005 >> 1) & 1, q4d = (g_ch005 >> 2) & 1;
+    int q3u = (g_ch005 >> 3) & 1, q3d = (g_ch005 >> 4) & 1;
+    int q2u = (g_ch005 >> 5) & 1, q2d = (g_ch005 >> 6) & 1;
+    int q1u = (g_ch005 >> 7) & 1, q1d = (g_ch005 >> 8) & 1;
+    // ch006 bits 1-8: Q3A Q4F Q1F Q2A Q2L Q3R Q4R Q1L
+    int q3a = (g_ch006 >> 1) & 1, q4f = (g_ch006 >> 2) & 1;
+    int q1f = (g_ch006 >> 3) & 1, q2a = (g_ch006 >> 4) & 1;
+    int q2l = (g_ch006 >> 5) & 1, q3r = (g_ch006 >> 6) & 1;
+    int q4r = (g_ch006 >> 7) & 1, q1l = (g_ch006 >> 8) & 1;
+    // Net yaw  (V axis): +Q2D/+Q4U minus -Q2U/-Q4D
+    *nv = (q2d + q4u) - (q2u + q4d);
+    // Net pitch (U axis): +Q1D/+Q3U minus -Q1U/-Q3D
+    *nu = (q1d + q3u) - (q1u + q3d);
+    // Net roll (P axis): +(Q1F/Q2L/Q3A/Q4R) minus -(Q1L/Q2A/Q3R/Q4F)
+    *np = (q1f + q2l + q3a + q4r) - (q1l + q2a + q3r + q4f);
+}
+
+static void push_cdu_delta(agc_t *state, int counter,
+                           int32_t *att_mdeg, int32_t *pimu_mdeg)
+{
+    int32_t delta = *att_mdeg - *pimu_mdeg;
+    // Wrap delta to [-180000, +180000] to handle 360-degree wraparound.
+    if (delta < -MDEG_FULL_CIRCLE / 2) delta += MDEG_FULL_CIRCLE;
+    if (delta >  MDEG_FULL_CIRCLE / 2) delta -= MDEG_FULL_CIRCLE;
+    while (delta >= MDEG_PER_CDU_PULSE) {
+        UnprogrammedIncrement(state, counter, 1);   // PCDU
+        *pimu_mdeg += MDEG_PER_CDU_PULSE;
+        if (*pimu_mdeg >= MDEG_FULL_CIRCLE) *pimu_mdeg -= MDEG_FULL_CIRCLE;
+        delta -= MDEG_PER_CDU_PULSE;
+    }
+    while (delta <= -MDEG_PER_CDU_PULSE) {
+        UnprogrammedIncrement(state, counter, 3);   // MCDU
+        *pimu_mdeg -= MDEG_PER_CDU_PULSE;
+        if (*pimu_mdeg < 0) *pimu_mdeg += MDEG_FULL_CIRCLE;
+        delta += MDEG_PER_CDU_PULSE;
+    }
+}
 
 void peripheral_stub_init(void)
 {
@@ -103,8 +191,51 @@ void peripheral_stub_init(void)
     state->InputChannel[032] = LM_SIM_CH032;
     state->InputChannel[033] = LM_SIM_CH033;
 
+    // Emulate PAD LOAD for MASS. On real Apollo, the crew types V21N47E
+    // to load LM mass before any operational program runs. Without it,
+    // 1/ACCS computes LEMMASS=0 and never reaches 1/ACCRET (which sets
+    // ACCSOKAY in DAPBOOLS), and DAPIDLER stays in MOREIDLE forever
+    // since CHECKUP's `BZF MOREIDLE` keeps branching back. The CHARIN
+    // slot allocated by KEYRUPT1 then never gets CPU because slot 0's
+    // 1/ACCSET job at PRIO=27110 (lower than CHARIN's 30110) doesn't
+    // ENDOFJOB. MASS is a DP (two-word) value at erasable address 01244:
+    //   high word: high part of mass in B-16 scale (decimal kg * 65536)
+    //   low word:  low part
+    // Apollo 11 ascent stage was ~4700 kg; FULLAPS in Luminary099
+    // CONTROLLED_CONSTANTS.agc is OCT 5050 (decimal 5050) which is the
+    // nominal full ascent mass marker. Use FULLAPS so 1/ACCS's
+    // HIASCENT/LOASCENT bounds checks pass without clamping.
+    // MASS = Erasable[2][0244]; CSMMASS = Erasable[2][0245].
+    state->Erasable[2][0244] = 05050;   // MASS high word (FULLAPS)
+    state->Erasable[2][0245] = 0;       // MASS low word
+
     g_step_time_us = 0;
     g_pulse_phase  = 0;
+    g_att_x_mdeg = g_att_y_mdeg = g_att_z_mdeg = 0;
+    g_pimu_x_mdeg = g_pimu_y_mdeg = g_pimu_z_mdeg = 0;
+    g_rate_x_mdeg_s = g_rate_y_mdeg_s = g_rate_z_mdeg_s = 0;
+    g_ch005 = g_ch006 = 0;
+    g_zero_imu = 0;
+}
+
+void peripheral_stub_on_output(int channel, int value)
+{
+    if (channel == 005) {
+        g_ch005 = (uint16_t)(value & 0xFFFF);
+    } else if (channel == 006) {
+        g_ch006 = (uint16_t)(value & 0xFFFF);
+    } else if (channel == 012) {
+        // Bit 5 of ch012 = ISS ZERO command. lm_simulator.tcl process_data
+        // line 841 calls zeroIMU when this transitions to 1.
+        if (value & 0x10) {
+            g_att_x_mdeg = g_att_y_mdeg = g_att_z_mdeg = 0;
+            g_pimu_x_mdeg = g_pimu_y_mdeg = g_pimu_z_mdeg = 0;
+            g_rate_x_mdeg_s = g_rate_y_mdeg_s = g_rate_z_mdeg_s = 0;
+            g_zero_imu = 1;
+        } else {
+            g_zero_imu = 0;
+        }
+    }
 }
 
 // PCDU counter addresses (Block II AGC, per agc_engine.c FIRST_CDU=032).
@@ -138,38 +269,74 @@ void peripheral_stub_step(agc_t *state, uint32_t dt_us)
     g_step_time_us += dt_us;
     g_pulse_phase++;
 
-    // Re-assert the LM_Simulator channel baselines.
+    // Continuous channel feed at lm_simulator.tcl's cadence (every step).
     state->InputChannel[030] = LM_SIM_CH030;
     state->InputChannel[033] = LM_SIM_CH033;
 
-    // CDU pulses: on Pi/Linux, LM_Simulator drives these from simulated
-    // attitude deltas (modify_gimbal_angle in AGC_IMU.tcl). At rest
-    // with no jet firings, zero pulses fire and the AGC sees a stable
-    // IMU.
-    //
-    // Empirically, the boot-time 1/ACCS computation in Luminary099
-    // does NOT terminate without *some* CDU input — without pulses
-    // slot 0 stays parked at PRIO=30110 forever inside GOODEPS1
-    // (AOSTASK_AND_AOSJOB.agc:216). A minimum-rate trickle of pulses
-    // (1 per axis per call) is enough to unblock it. This matches
-    // LM_Simulator's behavior since gimbal-angle deltas accumulate
-    // small floating-point residuals even when nominally stationary.
-    //
-    // Pi/Linux rate is 400 cps per axis from update_RCS; we do one
-    // pulse per axis per peripheral_stub_step call (~5 Hz from the
-    // legacy 200ms tick) — enough to keep 1/ACCS happy without
-    // flooding the DAP with phantom motion.
-    UnprogrammedIncrement(state, CDUX_COUNTER, PCDU_INC_TYPE);
-    UnprogrammedIncrement(state, CDUY_COUNTER, PCDU_INC_TYPE);
-    UnprogrammedIncrement(state, CDUZ_COUNTER, PCDU_INC_TYPE);
+    if (g_zero_imu) {
+        // ISS ZERO active — AGC commanded the IMU to zero. Don't drive
+        // any motion while it's zeroing.
+        return;
+    }
 
+    // Decode current jet enable state into net torques per body axis.
+    int nv, nu, np;
+    decode_jets(&nv, &nu, &np);
+
+    // Integrate angular acceleration into body rate. dt_us / 1e6 gives
+    // seconds; we keep milli-deg/sec internally so multiply accel by
+    // dt_ms / 1000 and add.
+    int32_t dt_ms = (int32_t)(dt_us / 1000);
+    if (dt_ms < 1) dt_ms = 1;
+    g_rate_x_mdeg_s += (int32_t)nv * JET_ACCEL_MDEG_PER_S2 * dt_ms / 1000;
+    g_rate_y_mdeg_s += (int32_t)nu * JET_ACCEL_MDEG_PER_S2 * dt_ms / 1000;
+    g_rate_z_mdeg_s += (int32_t)np * JET_ACCEL_MDEG_PER_S2 * dt_ms / 1000;
+
+    // Integrate rate into attitude angle.
+    int32_t da_x = g_rate_x_mdeg_s * dt_ms / 1000;
+    int32_t da_y = g_rate_y_mdeg_s * dt_ms / 1000;
+    int32_t da_z = g_rate_z_mdeg_s * dt_ms / 1000;
+    g_att_x_mdeg += da_x;
+    g_att_y_mdeg += da_y;
+    g_att_z_mdeg += da_z;
+    while (g_att_x_mdeg <  0)               g_att_x_mdeg += MDEG_FULL_CIRCLE;
+    while (g_att_x_mdeg >= MDEG_FULL_CIRCLE) g_att_x_mdeg -= MDEG_FULL_CIRCLE;
+    while (g_att_y_mdeg <  0)               g_att_y_mdeg += MDEG_FULL_CIRCLE;
+    while (g_att_y_mdeg >= MDEG_FULL_CIRCLE) g_att_y_mdeg -= MDEG_FULL_CIRCLE;
+    while (g_att_z_mdeg <  0)               g_att_z_mdeg += MDEG_FULL_CIRCLE;
+    while (g_att_z_mdeg >= MDEG_FULL_CIRCLE) g_att_z_mdeg -= MDEG_FULL_CIRCLE;
+
+    // Push CDU pulses to match the integrated angle.
+    push_cdu_delta(state, CDUX_COUNTER, &g_att_x_mdeg, &g_pimu_x_mdeg);
+    push_cdu_delta(state, CDUY_COUNTER, &g_att_y_mdeg, &g_pimu_y_mdeg);
+    push_cdu_delta(state, CDUZ_COUNTER, &g_att_z_mdeg, &g_pimu_z_mdeg);
 }
+
+// DAPBOOLS @ erasable 0111 (bank 0 unswitched). ACCSOKAY = BIT3 = 04.
+#define DAPBOOLS_OFFSET   0111
+#define ACCSOKAY_BIT      04
+// MASS @ 01244 -> Erasable[2][0244]. CSMMASS @ 01245.
+#define MASS_BANK         2
+#define MASS_HI_OFFSET    0244
+#define MASS_LO_OFFSET    0245
+#define MASS_FULLAPS      05050     // FULLAPS from CONTROLLED_CONSTANTS.agc
 
 void peripheral_stub_tick(agc_t *state)
 {
-    // Periodic tick currently disabled to isolate alarm sources. Pi/Linux
-    // LM_Simulator writes ch030/ch031/ch032/ch033 every ~25ms; if we
-    // re-enable, do it at a comparable rate. The peripheral_stub_init
-    // already set the initial values once, which is enough to boot.
-    (void)state;
+    if (state == NULL) return;
+    // channel_router_on_routine calls us every ~16k engine cycles
+    // (~200ms simulated time). Drive one simulator step per tick.
+    peripheral_stub_step(state, 200000);
+
+    // Persist PAD-LOAD state: MASS valid + ACCSOKAY set. Real Apollo
+    // does these via crew V21N47E (mass) and via 1/ACCS completion.
+    // Luminary's POODOO/BAILOUT/ABORT software-restart paths clear
+    // DAPBOOLS to BOOLSTRT (no ACCSOKAY) and may zero MASS. By
+    // re-asserting these every tick we ensure DAPIDLER's CHECKUP
+    // path stays on STARTDAP rather than the MOREIDLE block that
+    // starves CHARIN. Equivalent to the operator re-issuing PAD LOAD
+    // after every software restart.
+    state->Erasable[MASS_BANK][MASS_HI_OFFSET] = MASS_FULLAPS;
+    state->Erasable[MASS_BANK][MASS_LO_OFFSET] = 0;
+    state->Erasable[0][DAPBOOLS_OFFSET] |= ACCSOKAY_BIT;
 }

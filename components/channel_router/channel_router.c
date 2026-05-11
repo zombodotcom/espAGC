@@ -255,8 +255,14 @@ void channel_router_on_output(int channel, int value)
     }
     case 011: apply_ch11(value);  break;
     case 0163: apply_ch163(value); break;
-    default: break; // ignore other channels for now
+    default: break; // ignore other channels for DSKY decode
     }
+    // Forward output channels to peripheral_stub regardless — it observes
+    // ch005/ch006 (RCS jet enables) and ch012 (ISS ZERO command) to
+    // update simulated attitude state, same as lm_simulator.tcl's
+    // process_data does on Pi/Linux.
+    if (channel == 005 || channel == 006 || channel == 012)
+        peripheral_stub_on_output(channel, value);
     xSemaphoreGive(g_mutex);
 }
 
