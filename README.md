@@ -118,7 +118,7 @@ Hold the boot button at reset to switch ROM to Comanche055.
 |---|---|---|
 | **V35E** (lamp test) | works ✅ | After V then 3 then 5: VERB digits show "35". After E: all six digit pairs show "88" and every status lamp lights for ~5 sec, then turns off |
 | **R** (RSET) | works ✅ | Clears RESTART lamp |
-| **V37E…E** (program select) | partial ⚠️ | Verb display shows "37" correctly after `V 3 7 E`, but the trailing program-number digits (e.g., `00 E` for P00) don't currently complete. Investigation in `tests/host/test_v37e00e_full.c` and `test_v37_slots.c` |
+| **V37E00E** (select P00) | partial ⚠️ | VRB shows "37" after V37E. NUN shows "00" after typing the program-number digits. After the final E, NUN clears (program-change executes). PROG digits don't show "00" yet — MMDSPLAY at GOPROG3 should display MODREG via SETUPDSP→DSPMMJB→DSPDECVN, but the long V37→POOH→IBNKCALL chain doesn't complete in our test window. Diagnostics in `tests/host/test_v37e00e_full.c` and `test_v37_slots.c` |
 
 V35E is the headline demo — it exercises CHARIN dispatch, lamp test verb 35, ch010 row-by-row digit + lamp output, and the full DSKY render pipeline end-to-end.
 
