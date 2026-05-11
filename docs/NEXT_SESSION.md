@@ -1,6 +1,65 @@
-# Next session handoff — slot-0 layout was misread; CHARIN dispatch still broken
+# Next session handoff — FBANK leak between interrupts is the root cause
 
-Last touched: 2026-05-12 (very early). All commits up to `c95a451` pushed to `origin/main`.
+Last touched: 2026-05-12. All commits up to `4814251` pushed to `origin/main`.
+
+## Real root cause (FIFTH revision, this is the right one)
+
+Host harness now reproduces the bug via `tests/host/test_charin_dispatch.c`, `test_charin_timeline.c`, `test_charin_trace.c`, and the decisive `test_novac_dca.c`. Fast iteration loop, no flash cycle needed.
+
+**The bug**: yaAGC's engine state leaks `FBANK` between interrupt contexts. Two identical KEYRUPT1 → NOVAC dispatches on host produce **different** FBANK values at the moment of NOVAC's `DCA 0`:
+
+| Cycle | Q (caller's return) | FBANK | A (post-DCA) | L | Notes |
+|---|---|---|---|---|---|
+| 3457 | 02037 | **00201** | 00000 | 00000 | First DCA call ever — reads zeros |
+| 122935 | 03311 (KEYRUPT1 -> CHARIN) | **11002** (bank 4) | 00013 | 00001 | First auto-RSET CHARIN |
+| 200056 | 03311 (KEYRUPT1 -> CHARIN, again) | **16516** (bank 7!) | 00043 | 00001 | After manual VERB keypress |
+
+Same code path (KEYRUPT1 lead-in → handler → ACCEPTUP → TC NOVAC, with Q=03311 = the address of the inline 2CADR words after `TC NOVAC`), but different `FBANK` at the DCA moment. The 2CADR words live at bank `BBANK_at_TC_NOVAC` offset `(03311 - 02000) = 01311`, so different banks read different words.
+
+`FBANK` should be stable for any specific KEYRUPT1 invocation — the lead-in sets it via `CAF KEYRPTBB; XCH BBANK`. But by the time DCA runs, FBANK has drifted.
+
+The drift is caused by **incomplete bank restoration on RESUME** in yaAGC's engine. Looking at `third_party/virtualagc/yaAGC/agc_engine.c:2874-2882`, the RESUME instruction does:
+```c
+State->NextZ = c (RegZRUPT) - 1;   // restore Z from ZRUPT
+State->InIsr = 0;                   // exit ISR
+State->SubstituteInstruction = 1;   // exec BRUPT next
+```
+
+It does **not** restore BBANK/FBANK from BANKRUPT. AGC convention says each ISR handler must do `LXCH BANKRUPT; TC RESUME` (or equivalent) before RESUME to restore the caller's bank. If some ISR handler in Luminary forgets, FBANK leaks to the next context.
+
+Or: our integration's `WriteIO` / `ChannelOutput` callback might be mutating FBANK as a side-effect of channel writes. Worth auditing.
+
+## What works (don't break)
+- Boot to clean DSKY (host-side ERROR catches the boot NW transient).
+- COMP ACTY blinks (Luminary's executive *is* executing instructions during the DOWNRUPT gaps).
+- `peripheral_stub_tick` restoration of `ch030`/`ch033` baselines and IMODES30/IMODES33 fresh-start values. The slot-0 ghost-clear hack was tried (commit history) and reverted; it didn't help.
+- Host test suite: 16/16 passing (including the new diagnostics, which PASS by printing rather than asserting).
+- `tests/host/test_replay_apollo11_launch.c` (decoder validated against recorded yaDSKY2 transcript).
+- Ring-buffer race in `channel_router_post_key` / `channel_router_pump_input` is now closed (`portMUX_TYPE` critical section).
+- `CONFIG_AGC_TRACE_KEYRUPT1` dispatcher + follow-ISR trace infrastructure.
+
+## Concrete next-session work
+
+1. **Audit yaAGC's RESUME path.** Confirm whether RESUME is supposed to restore FBANK from BANKRUPT (which would mean our engine is missing that restore — a patch to `agc_engine.c` under `#ifdef ESP_AGC_FIX_FBANK_RESUME`), OR whether each ISR handler is expected to do it explicitly (which would mean Luminary itself has a missing restore somewhere — much harder, indicates an upstream yaAGC bug).
+
+2. **Cross-reference Carl Wittnebert's Pi build and MKme/AGC_DSKY_Replica.** Both run real yaAGC + Luminary on hardware and reportedly work. They might have a small patch or integration tweak that addresses this. Check `git log` / issues in those repos for FBANK/BANKRUPT-related changes.
+
+3. **Find which ISR is leaking FBANK.** Add a tracer that logs `FBANK` at every `InIsr` 1→0 transition (RESUME exit). Compare what each ISR leaves FBANK at versus what BANKRUPT held on entry. The leaker will be the ISR where they don't match.
+
+4. **Once the leak is patched and CHARIN dispatches**, host `test_charin_dispatch.c` should see `DSPLOCK` transition to 1 (current behavior: stays at 0). On hardware, V35E via curl should light all DSKY segments.
+
+5. **Real assertion-bearing host tests** for V35E and V37E00E (P1.5 from the original plan). The current `test_lamp_test.c` and `test_p00_select.c` print-only versions need conversion to assert specific dsky_state digits and lamps.
+
+## Tried this session and unhelpful
+- PRIORITY slots init to -0 (commit `c95a451`). Doesn't break anything, kept in tree. AGC convention so defensible.
+- Slot-0 ghost clear in `peripheral_stub_tick`. Reverted — didn't help (the slot 4 ghost has same problem, doesn't fit our condition).
+- Neutering `peripheral_stub_tick` entirely. Same bug appears.
+
+## Files in tree after this session
+- `tests/host/test_charin_dispatch.c` — the failing-as-expected test (in run list)
+- `tests/host/test_charin_timeline.c` — standalone single-step timeline
+- `tests/host/test_charin_trace.c` — slot-lifecycle tracker
+- `tests/host/test_novac_dca.c` — the FBANK-leak smoking gun
 
 ## What is the actual problem (FOURTH revision)
 
