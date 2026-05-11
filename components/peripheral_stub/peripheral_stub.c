@@ -416,9 +416,22 @@ static void rescue_stuck_job(agc_t *state)
 #define CHARIN_BANKSET  060101  /* FBANK=030, SBANK in bit 6, EBANK=1 */
 #define CHARIN_PRIORITY 030110
 
+// 1/ACCSET's signature: PRIO = 027110 (PRIO27 + work area offset 0110).
+// This is the specific deadlock we're rescuing. Don't intervene for any
+// other active job — let Luminary's normal dispatch handle them.
+#define STUCK_1_ACCSET_PRIO 027110
+
 static void dispatch_pending_charin(agc_t *s)
 {
     if (s->InIsr) return;       // don't disturb interrupt processing
+
+    // Only intervene when the ACTIVE slot is the known-bad 1/ACCSET
+    // (PRIO=027110). Other legitimate running jobs must not be
+    // disturbed — that breaks normal verb-execution flow (e.g., V37
+    // sleeps in INTSTALL waiting for the user to type the program
+    // number; if we kill its slot, the program-change never completes).
+    int active_prio = s->Erasable[0][0167] & 077777;
+    if (active_prio != STUCK_1_ACCSET_PRIO) return;
 
     // Look for a CHARIN slot (skip slot 0, which is the active set).
     int charin_slot = -1;
@@ -435,20 +448,10 @@ static void dispatch_pending_charin(agc_t *s)
     }
     if (charin_slot < 0) return;
 
-    // Check if the active slot is ALSO at PRIO=30110 (duplicate). If so,
-    // free it. This catches stale CHARIN-display jobs blocking the new
-    // CHARIN.
-    int active_prio = s->Erasable[0][0167] & 077777;
-    if (active_prio == CHARIN_PRIORITY) {
-        s->Erasable[0][0167] = 077777;   // mark active free
-    } else if (active_prio != 077777 && active_prio < CHARIN_PRIORITY) {
-        // Lower priority blocking CHARIN. Mark it free too.
-        s->Erasable[0][0167] = 077777;
-    } else {
-        return;                          // nothing to dispatch over
-    }
+    // Free the stuck 1/ACCSET active slot.
+    s->Erasable[0][0167] = 077777;
 
-    // Now manually do CHANG2's swap: copy slot N's state to active.
+    // Manual CHANG2 swap: copy slot N's state to active.
     int src = 0154 + charin_slot * 014;
     for (int off = 0; off < 014; off++) {
         s->Erasable[0][0154 + off] = s->Erasable[0][src + off];
