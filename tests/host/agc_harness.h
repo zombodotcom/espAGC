@@ -29,6 +29,15 @@ void harness_boot(void);
 // turn into channel writes synchronously into channel_router.
 void harness_step(int n_cycles);
 
+// Tick the peripheral stub once. On hardware this is called from the agc
+// task at ~100Hz to refresh ch030/ch033 baselines and clear stale IMODES.
+// In host tests, call this explicitly to mimic hardware-side environment.
+void harness_tick_peripherals(void);
+
+// Enable auto-tick: peripheral_stub_tick() is called every N engine cycles.
+// Pass 0 to disable. Default is 0 (off) so existing tests are unchanged.
+void harness_set_peripheral_tick_interval(int cycles);
+
 // Inject a DSKY keypress (5-bit code; see dsky_keys.h).
 void harness_post_key(int code);
 

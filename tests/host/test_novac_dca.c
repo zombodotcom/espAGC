@@ -42,9 +42,11 @@ int main(void)
             int a   = st->Erasable[0][0] & 077777;
             int l   = st->Erasable[0][1] & 077777;
             int q   = st->Erasable[0][2] & 077777;
-            int fb  = st->InputChannel[004] & 077777;
-            int bb  = st->InputChannel[006] & 077777;
-            int eb  = st->InputChannel[003] & 07;
+            // RegFB (FBANK) at erasable address 4; RegBB (BBANK) at 6;
+            // RegEB (EBANK) at 3. Channel 04 is SCALER1 (a counter), NOT FBANK!
+            int fb  = st->Erasable[0][4] & 077777;
+            int bb  = st->Erasable[0][6] & 077777;
+            int eb  = st->Erasable[0][3] & 077777;
             printf("%8ld  %05o  %05o  %05o  %05o %05o   %o    %d\n",
                    cycle, q, a, l, fb, bb, eb, st->InIsr);
             if (dca_hits > 30) {

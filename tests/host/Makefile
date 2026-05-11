@@ -59,12 +59,18 @@ LAYER2_TESTS := test_alarm_at_boot test_p00_select test_lamp_test \
                 test_auto_rset_at_boot test_peripheral_stub_clears_imodes \
                 test_failreg_diagnostic test_lm_idle_quiet \
                 test_executive_state test_charin_dispatch
+# Diagnostic-only tests — build with the same rule as LAYER2 but not
+# included in the default `run` target since they're investigation
+# probes (long printouts, no assertions).
+DIAG_TESTS   := test_z_histogram test_hotloop_disasm test_restart_path \
+                test_keypress_response
 RENDER_TESTS := test_render_blank test_render_prog_lit
 
 TESTS := $(LAYER1_TESTS) test_keypad_hit $(LAYER2_TESTS) $(RENDER_TESTS)
 
-.PHONY: all run clean $(addprefix run-, $(TESTS))
+.PHONY: all diag run clean $(addprefix run-, $(TESTS))
 all: $(addsuffix .exe, $(TESTS))
+diag: $(addsuffix .exe, $(DIAG_TESTS))
 
 # --- Layer 1: engine + io stub --------------------------------------------
 $(addsuffix .exe, $(LAYER1_TESTS)): %.exe: %.c $(ENGINE_SRCS) $(INIT_SRCS) $(HOST_STUBS)
@@ -85,6 +91,10 @@ test_keypad_hit.exe: test_keypad_hit.c $(DISP_HAL)/dsky_keypad_320x240.c
 # lives in sdkconfig (set by Kconfig). channel_router.c uses `#ifdef`,
 # so the symbol must be defined here to match Kconfig=y behavior.
 $(addsuffix .exe, $(LAYER2_TESTS)): %.exe: %.c $(HARNESS_SRCS)
+	$(CC) $(CFLAGS) -DCONFIG_AGC_AUTO_RSET_AT_BOOT=1 $(HARNESS_INC) -o $@ $^ -lm
+
+# Diagnostic tests use the same build rule. Not in `run` target.
+$(addsuffix .exe, $(DIAG_TESTS)): %.exe: %.c $(HARNESS_SRCS)
 	$(CC) $(CFLAGS) -DCONFIG_AGC_AUTO_RSET_AT_BOOT=1 $(HARNESS_INC) -o $@ $^ -lm
 
 # --- Layer 2b: renderer pixel tests ---------------------------------------

@@ -171,3 +171,22 @@ Most plausible interpretation: the executive's `SETLOC` allocated slot 0 to CHAR
 Result: every subsequent keypress (manual RSET, V35E, V37E00E, V16N36E, anything) also schedules into a new slot but at the same priority `030110`, so `NEWJOB` doesn't update (priority equal to slot 0), and slot 0 never finishes. **The AGC is effectively input-deaf after the auto-RSET fires**.
 
 Trying `auto_rset = false` is the obvious next experiment: if disabling auto-RSET keeps slot 0 normal, then manual keypresses (from the web UI) may actually reach Luminary's CHARIN handler. Worth testing in next session.
+
+### Where Luminary is actually stuck (2026-05-11, late session)
+
+Built a Z-histogram diagnostic (`tests/host/test_z_histogram.c`, runs as `mingw32-make diag`). Over 2M cycles the engine spends 17 %+ of its time at six adjacent fixed-fixed addresses **Z=06070..06100**. Disassembly via `test_hotloop_disasm.c` shows a TCF-back-to-self loop at **06647..06674** that reads erasable cells `0117 (NNADTEM)` and `0120 (NNTYPTEM)` — both zero — and decrements/loops without progress. This is the AGC interpreter's `GOTO` family in fixed-fixed bank 3, confirming the prior "interpretive GOTO loop" guess.
+
+Built `test_restart_path.c` to track GOJAM triggers + watchdog flags:
+
+- 8 GOJAMs in 1.5M cycles, all firing with `NightWatchmanTripped=1`.
+- Spacing: first GOJAM at cycle 109,226 (~1.28 s of MCT time), subsequent every ~3.4k cycles, then a long stable window cycle 130k → 218k (~88k cycles) during which a real job briefly scheduled (`NEWJOB → 044 → 0` at cycle 133,605).
+- `RuptLock` and `NoRupt` flicker every ~13.6k cycles but always self-clear within 200 cycles. `NoTC`/`TCTrap` flap every ~850 cycles but also self-clear within 2-3 cycles.
+- **The only watchdog actually causing GOJAM is Night Watchman**, exactly because the interpretive loop above never references erasable address 067 (NEWJOB).
+
+Tried suppressing all alarms (`InhibitAlarms = 1` via `test_inhibit_alarms.c`, since deleted) plus setting `ch030 = 036377` (IMU/LGC/temp healthy): GOJAMs go to zero but slot-0 still parks in the same 06647..06674 loop, NEWJOB stuck at `00014`, DSKY blank. So NW is downstream of the same root cause — Luminary's boot-time interpreter routine is waiting for state it can't get.
+
+Tried disabling auto-RSET + InhibitAlarms (`test_no_autorset_keypress.c`, since deleted): same outcome — keypress posted, slot 0 picks up priority `00110` instead of `030110`, but `DSPLOCK` still stays 0 (CHARIN's first XCH never fires). The auto-RSET hypothesis is at most a contributor, not the root.
+
+**Root cause summary**: Luminary's interpretive GOTO loop at `06647..06674` reads from an erasable address chain that yaAGC's `agc_init.c` leaves zero-clear. On real hardware the LM_Simulator (per `third_party/virtualagc/Contributed/LM_Simulator/lm_simulator.tcl`) drives CDU counters and IMU bits that cause this routine to terminate. Without that feed, the loop runs forever and slot 0 never yields. Every keypress schedules into a free slot but the executive only switches at job yield points — so no keypress is ever dispatched.
+
+**What this means for the plan**: Phase 1 of the plan (fix the keypress dispatch bug) was misframed — there isn't a dispatch bug, the executive is doing exactly what it should. The actual blocker is **Phase 4 (LM_Simulator-equivalent peripheral feed)**, which is what the upstream Pi/Linux ports also rely on. The diagnostic harness (`mingw32-make diag`) is now in place; the next session should port the minimal subset of `lm_simulator.tcl` needed to feed CDU/IMU values that let the boot interpreter terminate.

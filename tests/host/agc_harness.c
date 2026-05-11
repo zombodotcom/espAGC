@@ -7,6 +7,7 @@
 #include "agc_core.h"
 #include "channel_router.h"
 #include "dsky_keys.h"
+#include "peripheral_stub.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -30,13 +31,40 @@ void harness_boot(void)
     free(rom);
 }
 
+static int g_peripheral_tick_interval = 0;
+static long g_cycles_since_tick = 0;
+
+void harness_set_peripheral_tick_interval(int cycles)
+{
+    g_peripheral_tick_interval = cycles;
+    g_cycles_since_tick = 0;
+}
+
+void harness_tick_peripherals(void)
+{
+    peripheral_stub_tick(agc_core_state());
+}
+
 void harness_step(int n_cycles)
 {
     if (n_cycles <= 0) return;
-    // We feed the engine through agc_core_step which already calls
-    // agc_engine() in a tight loop. The engine's ChannelOutput / ChannelInput
-    // reach our real io_callbacks.c -> channel_router.c.
-    agc_core_step(n_cycles);
+    if (g_peripheral_tick_interval <= 0) {
+        agc_core_step(n_cycles);
+        return;
+    }
+    // Run in chunks, calling peripheral_stub_tick between chunks.
+    int remaining = n_cycles;
+    while (remaining > 0) {
+        int chunk = g_peripheral_tick_interval - (int)g_cycles_since_tick;
+        if (chunk <= 0 || chunk > remaining) chunk = remaining;
+        agc_core_step(chunk);
+        g_cycles_since_tick += chunk;
+        remaining -= chunk;
+        if (g_cycles_since_tick >= g_peripheral_tick_interval) {
+            peripheral_stub_tick(agc_core_state());
+            g_cycles_since_tick = 0;
+        }
+    }
 }
 
 void harness_post_key(int code)

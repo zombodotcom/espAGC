@@ -18,6 +18,11 @@
 
 #include <stdio.h>
 
+#ifdef NEUTER_PSTUB
+void peripheral_stub_tick(void *state) { (void)state; }
+void peripheral_stub_init(void) {}
+#endif
+
 int main(void)
 {
     harness_boot();
