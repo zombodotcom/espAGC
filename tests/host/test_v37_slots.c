@@ -12,16 +12,20 @@ extern agc_t *agc_core_state(void);
 static void dump(const char *tag, agc_t *s)
 {
     printf("--- %s ---\n", tag);
-    printf("  RegZ=%05o RegFB=%05o RegBB=%05o ch7=%05o\n",
+    printf("  RegZ=%05o RegFB=%05o RegBB=%05o ch7=%05o ch015=%05o\n",
            s->Erasable[0][5] & 07777, s->Erasable[0][4] & 077777,
-           s->Erasable[0][6] & 077777, s->OutputChannel7);
+           s->Erasable[0][6] & 077777, s->OutputChannel7,
+           s->InputChannel[015]);
     int verbreg = s->Erasable[2][1] & 077777;
     int dspcount = s->Erasable[2][0] & 077777;
     int modreg = s->Erasable[0][6] & 077777;
     int dsplock = s->Erasable[2][012] & 077777;
     int mmnumber = s->Erasable[2][010] & 077777;
-    printf("  VERBREG=%05o DSPCOUNT=%05o MODREG=%05o DSPLOCK=%05o MMNUMBER=%05o\n",
-           verbreg, dspcount, modreg, dsplock, mmnumber);
+    int newjob = s->Erasable[0][067] & 077777;
+    printf("  VERBREG=%05o DSPCOUNT=%05o MODREG=%05o DSPLOCK=%05o MMNUMBER=%05o NEWJOB=%05o\n",
+           verbreg, dspcount, modreg, dsplock, mmnumber, newjob);
+    printf("  AllowInt=%d InIsr=%d KEYRUPT1=%d\n",
+           s->AllowInterrupt, s->InIsr, s->InterruptRequests[5]);
     for (int slot = 0; slot < 8; slot++) {
         int base = 0154 + slot * 014;
         int loc = s->Erasable[0][base + 8] & 077777;

@@ -29,11 +29,11 @@ int main(void)
     harness_snapshot(&s); printf("after E: VRB=[%d,%d] PRG=[%d,%d] NUN=[%d,%d]\n",
         s.verb[0], s.verb[1], s.prog[0], s.prog[1], s.noun[0], s.noun[1]);
 
-    harness_post_key(0);    harness_step(150000);  // 0
+    harness_post_key(16);   harness_step(150000);  // DSKY_KEY_0 ("0")
     harness_snapshot(&s); printf("after 0: VRB=[%d,%d] PRG=[%d,%d] NUN=[%d,%d]\n",
         s.verb[0], s.verb[1], s.prog[0], s.prog[1], s.noun[0], s.noun[1]);
 
-    harness_post_key(0);    harness_step(150000);  // 0
+    harness_post_key(16);   harness_step(150000);  // DSKY_KEY_0
     harness_snapshot(&s); printf("after 0: VRB=[%d,%d] PRG=[%d,%d] NUN=[%d,%d]\n",
         s.verb[0], s.verb[1], s.prog[0], s.prog[1], s.noun[0], s.noun[1]);
 
