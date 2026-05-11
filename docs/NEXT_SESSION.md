@@ -1,16 +1,28 @@
-# Next session handoff — boot-time slot-0 ghost is the actual bug
+# Next session handoff — slot-0 layout was misread; CHARIN dispatch still broken
 
-Last touched: 2026-05-11 (very late). All commits up to `f14d954` pushed to `origin/main`.
+Last touched: 2026-05-12 (very early). All commits up to `c95a451` pushed to `origin/main`.
 
-## What is the actual problem (THIRD revision, 2026-05-11 very late)
+## What is the actual problem (FOURTH revision)
 
-**Three framings behind us:**
+**Four framings have been tried so far:**
 
-1. *"KEYRUPT1 fires, NOVAC schedules CHARIN with bad CADR `077615`, CHARIN never runs."* — Right symptom (077615 is real), wrong cause.
+1. *"KEYRUPT1 fires, NOVAC schedules CHARIN with bad CADR `077615`."* — Right symptom (077615 is real in some cell), wrong cause.
 2. *"KEYRUPT1 never fires on hardware."* — Monitor rate-suppression artifact. Wrong.
-3. *"KEYRUPT1 dispatches but the handler body or NOVAC has a bug."* — Wrong; the follow-ISR trace this session showed the entire handler runs correctly.
+3. *"KEYRUPT1 dispatches but the handler body or NOVAC has a bug."* — Wrong; follow-ISR trace showed the handler runs correctly.
+4. *"Slot 0 has PRIO=030110 CADR[0]=0 boot ghost that the executive dispatches to address 0."* — **Wrong cell read.** `Erasable[0][0170]` (which I called "CADR[0]") is actually slot 1's MPAC scratchpad, not a CADR. Per `ERASABLE_ASSIGNMENTS.agc:388-395`, the 12-word slot layout is MPAC(7) / MODE / LOC / BANKSET / PUSHLOC / PRIORITY — with PRIORITY as the LAST cell (offset 11) and the job's entry address in LOC (offset 8). So slot 0's actual CADR is in `Erasable[0][0163]`, not `0170`. The 077615 value is just a piece of MPAC junk from slot 1.
 
-**Current framing — the bug is at boot, before any keypress:**
+**Current corrected reading** (from `commit c95a451` trace, which dumps the full slot cells):
+
+```
+slot0: MODE=03534 LOC=77776 BANKSET=20020 PUSHLOC=10006 PRIORITY=30110
+slot1: MODE=00000 LOC=00000 BANKSET=03250 PUSHLOC=10006 PRIORITY=00110
+```
+
+Both slots **unchanged** across the entire KEYRUPT1 ISR. So NOVAC2 wrote to slot >= 2 (the trace doesn't currently dump those). Slot 0's `LOC=77776` (= -1 in 1's-complement AGC) is unusual; might be a "completed" or stale value. Slot 1's `LOC=0, PRIO=00110` (= FAKEPRET alone, with no CHRPRIO contribution) is also odd.
+
+**The real symptom** observed via `curl -X POST --data V/3/5/E http://192.168.1.23/key` on hardware: no ch010 row writes follow the keypress sequence. CHARIN is not running. But all four framings above have been variously wrong about *why*.
+
+**Current framing — investigate which slot NOVAC2 wrote to and whether CHARIN dispatches:**
 
 After capturing a full KEYRUPT1 ISR via the new follow-ISR tracer (commit `f14d954`), the entire chain works:
 | Step | Z | Operation | Observed |
@@ -25,17 +37,23 @@ After capturing a full KEYRUPT1 ISR via the new follow-ISR tracer (commit `f14d9
 | NOVAC2 + FINDSLOT | 02625-02670 (bank 2) | slot allocation | ✓ a slot gets allocated |
 | RESUME | 05270-05276 | exits ISR | ✓ |
 
-**The actual problem:** `PRIORITY[0]=030110 CADR[0]=00000` was already set **before the keypress arrived**, and was **unchanged** by the entire KEYRUPT1 ISR. NOVAC2 didn't write to slot 0 because the slot was already "occupied" (PRIO is positive, not the `077777=-0` "free" sentinel). NOVAC2 must have used a different slot.
+**The actual situation needs more data.** The corrected trace shows slot 0 and slot 1 are *not* where NOVAC2 puts the new CHARIN job — both slots are unchanged across the ISR. Need to extend the trace to dump slots 2-7 to find where it actually landed, and to verify whether the AGC executive's job-search ever picks that slot to dispatch CHARIN.
 
-The 077615 corruption seen in `test_executive_state.c` and at the start of subsequent KEYRUPT1 ISRs comes from between RESUME of one ISR and the next ChannelRoutine: the executive job-search picks slot 0 (highest priority `030110`), tries to dispatch to CADR=0, runs garbage from address 0 (= RegA), eventually corrupts CADR[0] to 077615.
+What we DO know after this session:
+- The keypress chain works: post → pump → InterruptRequests[5] → KEYRUPT1 dispatch → handler → RAND MNKEYIN gets the correct keycode → ACCEPTUP → TC NOVAC.
+- NOVAC's DCA reads the 2CADR CHARIN words correctly (`A=02077, L=60101` at bank 4 offset 01311).
+- NOVAC2 runs slot allocation in bank 2 banked fixed (Z=02625-02670).
+- ISR RESUMEs cleanly.
+- After all that, slot 0 (PRIO=30110 LOC=77776) and slot 1 (PRIO=00110 LOC=0) are both unchanged. The new CHARIN job landed somewhere we're not currently watching.
+- V35E keypress sequence produces no ch010 row writes — CHARIN isn't actually executing visible code.
 
-So the chain is:
-1. **Boot** → Luminary's FRESH-START → first NOVAC call somewhere → slot 0 gets `PRIO=030110 CADR=00000` (the CADR write didn't take, even though the PRIO write did).
-2. **Executive runs** → finds slot 0 highest priority → dispatches to CADR=0 → runs garbage → writes 077615 to some cell that happens to be CADR[0].
-3. **Keypress arrives** → KEYRUPT1 → NOVAC2 → schedules CHARIN to slot 1 or higher (slot 0 marked occupied).
-4. **Executive runs again** → STILL picks slot 0 (highest priority, beats slot N's CHARIN at same priority by index tiebreaker) → garbage continues → CHARIN never gets to run.
+What's STILL unknown:
+- Which slot does NOVAC2 actually write to?
+- Does the executive ever pick that slot?
+- If it does, does CHARIN's body actually execute its first instruction (`XCH DSPLOCK`)?
+- If so, why are there no resulting ch010 writes?
 
-That's why no keypress has visible effect: CHARIN is *scheduled* in a non-0 slot but never *dispatched* because slot 0's ghost permanently outranks it.
+These are the questions for the next session.
 
 ## What works (don't break)
 
@@ -55,19 +73,25 @@ From `CONFIG_AGC_TRACE_KEYRUPT1=y` build, UART captured at 115200 baud on COM7:
 - Zero entries with `Z` in `04024..04027` (the KEYRUPT1 lead-in window).
 - Auto-RSET fires at tick 16 (~2.5s); `channel_router: auto-RSET posted at boot` line confirms `channel_router_post_key(DSKY_KEY_RSET)` ran. But no KEYRUPT1 trace entry follows it.
 
-## Hypotheses for the boot-time slot-0 ghost
+## Tried and ruled out (or unhelpful)
 
-The ghost has `PRIO=030110 CADR=00000`. PRIO=030110 = CHRPRIO(030000) + FAKEPRET(00110). That's the priority NOVAC produces for a CHARIN-scheduled job. So at boot, **something called NOVAC with `A=030000` (CHRPRIO), but the 2CADR words at the indexed Q location were zero**.
+1. **PRIORITY slot init to 077777 (-0).** Tried in commit `c95a451`. The `agc_init.c` change initializes all 8 PRIORITY cells to -0 (the AGC convention for "free slot") instead of leaving them zero-cleared. The fix is defensible regardless and is kept in tree, but it does not make V35E work on hardware. Slot 0 still ends up with PRIO=30110 after FRESH-START runs, so Luminary writes the priority regardless of our init.
 
-1. **An early NOVAC call hits zero-padded 2CADR words.** The most likely scenario. During FRESH-START (`FRESH_START_AND_RESTART.agc`), Luminary calls NOVAC to schedule a startup job. That `TC NOVAC` is followed by a `2CADR` directive. yaYUL expands the 2CADR to two specific words. If our ROM-loader misplaces those words (off-by-one, wrong bank, wrong byte order at that specific page), the engine's `INDEX Q; DCA 0` reads zeros. Verify: trace earliest NOVAC call during boot (before any keypress); compare A/L after the DCA against expected encoded values.
+2. **Ring-buffer portMUX (commit `375db8d`).** Was a real concurrency defect (the producer/consumer ring had no synchronization). Now fixed but not the bug behind keypress-deafness.
 
-2. **The 2CADR address calculation in our engine has a banking error specific to one of the FRESH-START callers.** The KEYRUPT1 case works (its 2CADR reads 02077/60101 correctly). Some other NOVAC call site might be in a bank where our engine resolves `INDEX Q` wrong. Verify: trace EVERY NOVAC call from boot, log A/L post-DCA.
+3. **Banked-fixed handler trace (commit `f14d954`).** Surfaced the full KEYRUPT1 ISR; verified handler runs correctly through to RESUME. Trace coverage is good for the ISR itself.
 
-3. **Luminary's FRESH-START specifically expects PRIORITY slots pre-set to `077777` (-0 = free) before it runs.** Our `agc_init.c` zeroes all erasable. Zero means "occupied at priority 0" — a real (lowest-priority) job. If Luminary's first NOVAC call iterates slots looking for free (=-0), it skips slot 0 because slot 0 isn't free; falls through; eventually overwrites slot 0 partially. Verify: try a one-line fix in `agc_init.c` that initializes `Erasable[0][0167 + slot*014] = 077777` for slots 0-7 before letting the engine run. If the ghost disappears and CHARIN starts dispatching, this is it.
+## Hypotheses for next session
 
-4. **Our `peripheral_stub_tick` writes to a cell that overlaps PRIORITY[0]+CADR[0].** The stub does `Erasable[0][0375..0377] = 0` (FAILREG zeroing) and `Erasable[2][036] &= ~mask` (DSPTAB+11D). Neither overlaps with 0167/0170. But verify by binary-disabling `peripheral_stub_tick` temporarily and observing whether the slot-0 ghost still appears.
+1. **Find which slot NOVAC2 writes to.** Extend the keyrupt_trace_step ENTRY/RESUME dumps to cover all 8 slots, not just slot 0 and 1. Compare ENTRY vs RESUME to spot the slot that got written. Then watch that slot's LOC for dispatch.
 
-Hypothesis 3 is the cheapest to test (1 line) and matches the symptom most directly. Try first.
+2. **Trace the executive's main loop.** The job-search code runs continuously between ISRs. Probably lives at a known fixed address. Once we know which slot has CHARIN, watch whether the executive ever loads its LOC into RegZ.
+
+3. **Watch DSPLOCK directly between ISRs.** Currently the trace's DSPLOCK delta-watch only fires while inside an ISR (because the follow-ISR latch gates it). Add a separate global DSPLOCK watch in `dispatch_trace_step` so we see if/when CHARIN's `XCH DSPLOCK` ever fires — answering "does CHARIN's body ever execute?"
+
+4. **Confirm via host harness.** Add a host test that walks the same path: boot Luminary, post RSET, step 200k cycles, check `Erasable[2][012]` (DSPLOCK). If DSPLOCK transitions 0→1, host harness sees CHARIN run; if not, host reproduces hardware behavior (and we have a faster reproduction loop than the flash cycle).
+
+Hypothesis 4 is the cheapest and most useful: a host test that asserts DSPLOCK is set after a keypress. If host PASSES (DSPLOCK becomes 1), hardware-specific issue (race, timing); if host FAILS too, fundamental engine/init bug we can iterate on without flashing.
 
 ## Concrete next-session work
 
