@@ -228,3 +228,24 @@ Two practical next paths:
 2. **Accept the NW trips, fix the *consequence*.** The visible problem isn't NW per se — it's that auto-RSET happens during the unstable phase and ends up allocating slot 0 to a CHARIN-priority job that competes with later keypresses (per prior SESSION_NOTES). If we delay auto-RSET until **after** Luminary settles into a working executive idle (e.g., 5-10 sec rather than 160 ms), the slot-0 contention might never happen.
 
 Both are testable in host. Option 2 is the cheapest fix candidate.
+
+### Critical reframe #2 (same session) — KEYRUPT1 *is* firing, but NOVAC schedules junk
+
+Added `tests/host/test_delayed_rset_keypress.c` which boots, runs to 1 M cycles, then posts a series of keypresses (VERB, 3, 5, ENTR, RSET) with 200 k cycle delays. Every snapshot dumps `InterruptRequests[5]`, `ch015`, all 8 slot cells, NEWJOB, DSPLOCK.
+
+Results:
+
+- After every keypress, `IR5 = 0` and `ch015` reflects the new keycode. **KEYRUPT1 is firing for every key.** That contradicts the earlier "keypress not arriving" framing.
+- After every keypress, **a new slot gets allocated** at priority `00110` (slot 3, then 4, then 5, then 6 across the 4 non-RSET keys). So NOVAC's slot allocation works — slots really do fill up.
+- But every newly-allocated slot has **LOC=00000** and BANKSET = `02077` (looks like the low half of the CHARIN 2CADR, just stored in the wrong cell).
+- And priority is `00110` (FAKEPRET alone), not `030110` (CHRPRIO + FAKEPRET) — so the priority value is missing the CHRPRIO contribution too.
+- Manual RSET takes a different path (engine's hardware-direct RestartLight clear in `agc_engine.c:586`) and *does* cause NEWJOB to cycle to `077777` (DUMMYJOB runs), proving the executive is reachable. But CHARIN never runs because slot 0 (held since boot) blocks at priority `00110` ≥ later slots' `00110`.
+
+The next concrete debug step: instrument the engine to log `A`, `L`, `Q`, and the two words read by `DCA 0` inside NOVAC's body at Z=05100, on every NOVAC entry. Compare with the upstream-yaAGC behavior. Likely findings: either (a) RegA is 0 at TC NOVAC time (caller forgot to `CAF CHRPRIO` — Luminary bug? unlikely), or (b) the 2CADR after the TC NOVAC instruction in our ROM image is wrong (ROM load bug), or (c) DCA reads correctly but the subsequent DXCH NEWLOC clobbers one half of A/L before SETLOC stores both into the slot.
+
+Slot-cell offsets I was using in this session's tests were also confused. Per `tests/host/test_executive_state.c`:
+- `PRIORITY[slot]` = `Erasable[0][0167 + slot*014]` (PRIORITY is at the END of each slot)
+- the *next* cell `0170 + slot*014` is the START (MPAC) of the *next* slot — not "CADR of this slot"
+- LOC of slot N is at `0156 + N*014 + 8` = MPAC_of_slot_N + 8 (MPAC_of_slot_0 = 0156? need to verify by counting from `SETLOC 67` through the ERASABLE_ASSIGNMENTS declarations)
+
+In short: today proved KEYRUPT1 dispatches, NOVAC allocates slots, but slot LOC ends up 0 and priority drops CHRPRIO. The "slot 0 held forever" framing partially holds, but the real failure is upstream — NOVAC's scheduling of the new job produces an unrunnable slot (LOC=0 means execute from address 0 = RegA). The fix path is to find why TC NOVAC isn't passing A=CHRPRIO and the right 2CADR.
