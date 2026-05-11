@@ -9,12 +9,21 @@ The emulator core is yaAGC. License is **GPL v2** (carries through from yaAGC).
 | Layer | Status | Notes |
 |---|---|---|
 | Layer 1 — pure-logic host tests | **4/4 PASS** | ROM loader, engine boot, channel-10 DSKY emit, keypad hit-test (~1 s) |
-| Layer 2a — engine + real channel_router | **5/5 PASS** | Boot alarm dump, P00 select, lamp test, RSET clears RESTART, Apollo 11 launch transcript replay |
+| Layer 2a — engine + real channel_router | **11/11 PASS** | Boot alarm dump, P00 select, lamp test, RSET clears, Apollo 11 transcript replay, auto-RSET, IMODES, FAILREG, idle quiet, executive state, CHARIN dispatch |
 | Layer 2b — renderer pixel tests | **2/2 PASS** | Blank frame FNV-1a hash, region assertions for lit PROG/VERB/NOUN cells |
+| `yaagc_ref` | **builds, runs** | Reference harness using upstream `agc_engine_init.c` directly — links `NullAPI.c` to bypass the socket layer. Run `./yaagc_ref.exe` to see vanilla yaAGC's cold-boot behavior for comparison. |
 | Layer 3 — QEMU | **deferred** | No QEMU support for ESP32-C5/WROOM in any released QEMU; covered by Layer 2 instead |
-| Layer 4 — hardware | **boots, runs** | Firmware brings up the ST7789 panel, loads Luminary099, joins WiFi (or falls back to a SoftAP `espAGC`), and accepts taps on the on-screen 19-key keypad |
+| Layer 4 — hardware | **boots, COMP ACTY runs** | Firmware brings up the ST7789 panel, loads Luminary099, joins WiFi (or falls back to a SoftAP `espAGC`), and accepts taps on the on-screen 19-key keypad. COMP ACTY lamp confirms the executive is dispatching jobs. V35E digit display does not render yet — see "Known limitations" below. |
 
 DSKY output renders as a 320×240 framebuffer on the ST7789 panel — status panel, register window, and an on-screen 19-key keypad backed by the XPT2046 resistive touchscreen. No LVGL — direct framebuffer in 80-row strips, three passes per frame.
+
+## Known limitations
+
+**V35E lamp test and other DSKY verbs do not render digits yet.** Root cause (verified via `yaagc_ref` against vanilla yaAGC): cold-boot Luminary099 without a `--resume` core-dump file or a connected LM_Simulator socket peer enters a deadlock. 1/ACCSET (PRIO=27110, allocated by DAPIDLER's first T5RUPT) executes interpretive code that gets caught in `INTERPRETER.agc:681` GOTO indirection (POLISH=0 dereferencing zero scratch storage). Block II AGC is non-preemptive, so CHARIN (allocated on keypress) can never take CPU.
+
+**Our mitigation** (`peripheral_stub_tick` in `components/peripheral_stub/peripheral_stub.c`): detect persistent NEWJOB and trigger a simulated GOJAM matching `agc_engine.c:2246-2298`. This recovers the engine — COMP ACTY lamp lights up and the executive resumes dispatching. After rescue, RCSFLAGS bit 13 is kept asserted so DAPIDLER's CHECKUP path doesn't re-NOVAC 1/ACCSET.
+
+**What remains:** post-rescue, duplicate CHARIN allocations at the same priority (PRIO=30110) can block dispatch when a stale slot is "active" and a fresh CHARIN slot is "waiting." A targeted slot-deduplication step in the rescue path is the cleanest fix and is the next intended commit.
 
 ## Boot behavior — the PROG ALARM caveat
 
@@ -34,8 +43,8 @@ components/
                      from third_party/virtualagc/yaAGC, replaces
                      SocketAPI.c with io_callbacks.c and agc_engine_init.c
                      with a memory-loading agc_init.c. Initializes ch030
-                     to 036377 ("healthy LM" — IMU operating, LGC in
-                     control, temp within limits).
+                     to 037777 (matches upstream yaAGC default — all
+                     signals de-asserted, "IMU not yet operating").
   apollo_rom/        Runs host yaYUL on virtualagc's Luminary099 / Comanche055
                      mission trees at configure time, embeds the binaries
                      via EMBED_FILES.
@@ -137,6 +146,19 @@ Compile `dsky_render_320x240.c` + `font5x7.c` + `dsky_layout.c` + `dsky_keypad_3
 |---|---|
 | `test_render_blank` | Blank dsky_state renders to a non-empty buffer; FNV-1a hash is stable across builds (drop a font or layout tweak — fail loudly, update the hash deliberately) |
 | `test_render_prog_lit` | After setting PROG=12, VERB=16, NOUN=65, region assertions confirm at least N amber pixels land inside the labelled cell rectangles. Robust to font/spacing tweaks; fails only when a digit literally isn't painted |
+
+### Reference harness — comparing against vanilla yaAGC
+
+`yaagc_ref.exe` is a minimal reference binary that links the **upstream** yaAGC engine + `agc_engine_init.c` + `NullAPI.c` directly. It's the cleanest way to see what cold-boot Luminary does without any of our integration layered on top — useful for distinguishing "our bug" from "upstream behavior."
+
+```powershell
+cd tests\host
+mingw32-make yaagc_ref.exe
+./yaagc_ref.exe                          # vanilla yaAGC + Luminary099
+./yaagc_ref.exe --sim                    # + peripheral_stub_step every 1k cycles
+```
+
+Outputs `Z`, `PRIORITY`, `POLISH`, `LOC`, `REDOCTR` at cycle 1k / 5k / 10k / 30k / 100k / 500k / 1M / 2M, plus a Z-histogram of the last 10k cycles. The histogram makes deadlocks visible (one or two Z values dominating = stuck loop) versus healthy execution (broad distribution).
 
 ### Why this layering
 
