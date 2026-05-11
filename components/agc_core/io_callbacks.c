@@ -13,6 +13,44 @@
 #ifdef CONFIG_AGC_TRACE_KEYRUPT1
 #include "esp_log.h"
 static const char *KEYRUPT_TAG = "keyrupt";
+static const char *DISP_TAG    = "disp";
+
+// Dispatcher trace: on every ChannelInput cycle, watch a handful of
+// engine state cells for transitions and emit one log line when any of
+// them change. Targeted at answering "does KEYRUPT1 ever get a chance
+// to dispatch?" by showing the moment InIsr goes 1->0 and what
+// InterruptRequests[] looks like at that moment. Rate-limited by
+// transition-only logging - at the observed ~60 ISR entries/sec the
+// log rate stays well under the UART budget.
+static void dispatch_trace_step(agc_t *State)
+{
+    static int prev_isr      = -1;
+    static int prev_allow    = -1;
+    static int prev_reqs[11] = { -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1 };
+
+    int isr   = State->InIsr;
+    int allow = State->AllowInterrupt;
+    int z     = State->Erasable[0][RegZ];
+
+    bool changed = (isr != prev_isr) || (allow != prev_allow);
+    for (int i = 1; i <= 10; i++) {
+        if (State->InterruptRequests[i] != prev_reqs[i]) changed = true;
+    }
+    if (!changed) return;
+
+    char reqs[11];
+    for (int i = 1; i <= 10; i++) {
+        reqs[i - 1] = State->InterruptRequests[i] ? '1' : '0';
+    }
+    reqs[10] = 0;
+    ESP_LOGI(DISP_TAG,
+             "Z=%05o isr=%d AI=%d reqs[1..10]=%s",
+             z, isr, allow, reqs);
+
+    prev_isr   = isr;
+    prev_allow = allow;
+    for (int i = 1; i <= 10; i++) prev_reqs[i] = State->InterruptRequests[i];
+}
 
 // KEYRUPT1 lives at fixed-fixed 04024 and runs through 04046 (TC RESUME).
 // The interesting window is the full KEYRUPT1 body plus the first instr
@@ -87,6 +125,7 @@ void ChannelOutput(agc_t *State, int Channel, int Value)
 int ChannelInput(agc_t *State)
 {
 #ifdef CONFIG_AGC_TRACE_KEYRUPT1
+    dispatch_trace_step(State);
     keyrupt_trace_step(State);
 #endif
     return channel_router_pump_input(State);
