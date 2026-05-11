@@ -1,29 +1,41 @@
-# Next session handoff — trace KEYRUPT1 handler body, look for bad CHARIN dispatch
+# Next session handoff — boot-time slot-0 ghost is the actual bug
 
-Last touched: 2026-05-11 (late). All commits up to `630f56a` pushed to `origin/main`.
+Last touched: 2026-05-11 (very late). All commits up to `f14d954` pushed to `origin/main`.
 
-## What is the actual problem (UPDATED AGAIN 2026-05-11 late)
+## What is the actual problem (THIRD revision, 2026-05-11 very late)
 
-**Two false starts behind us.** The trail of theories so far:
+**Three framings behind us:**
 
-1. **First framing** (early sessions): *"KEYRUPT1 fires, NOVAC schedules CHARIN with bad CADR `077615`, CHARIN never runs."* Based on `test_executive_state.c` observations.
-2. **Second framing** (earlier 2026-05-11): *"KEYRUPT1 never fires on hardware."* Based on dispatcher trace showing no `Z=04024` events. **This was a Monitor rate-suppression artifact** — single-cycle KEYRUPT1 events were getting dropped while DOWNRUPT's 4-cycle bursts came through.
-3. **Current framing** (this session, late 2026-05-11): The full producer→consumer→dispatcher chain works correctly:
-   ```
-   chrouter: post: code=22 queued, head=1 tail=0
-   chrouter: auto-RSET posted at boot (tick 16)
-   chrouter: pump: pulled code=22 ir5=1 ch015=00022
-   disp:    Z=04024 isr=1 AI=1 reqs[1..10]=0000000000
-   keyrupt: Z=04024 ...  DXCH ARUPT
-   keyrupt: Z=04025 ...  CAF KEYRPTBB
-   keyrupt: Z=04026 ...  XCH BBANK
-   keyrupt: Z=04027 ...  TCF KEYRUPT1 (-> handler in switched bank)
-   ```
-   KEYRUPT1 dispatches reproducibly. The 4-instruction lead-in executes cleanly. After `TCF KEYRUPT1` the PC jumps to the actual handler in switched-bank fixed memory (FBANK was `11000` octal at the moment of dispatch — that's bank 0o22 = bank 18 decimal in the upper-bank space, by the encoding `FBANK = (bank << 10)` so bank 0o22 → `0o22 << 10 = 0o22000` octal, but the trace shows `FB=11000` which decodes as bank `0o11` = 9, after super-bank... TBD).
+1. *"KEYRUPT1 fires, NOVAC schedules CHARIN with bad CADR `077615`, CHARIN never runs."* — Right symptom (077615 is real), wrong cause.
+2. *"KEYRUPT1 never fires on hardware."* — Monitor rate-suppression artifact. Wrong.
+3. *"KEYRUPT1 dispatches but the handler body or NOVAC has a bug."* — Wrong; the follow-ISR trace this session showed the entire handler runs correctly.
 
-   **The trace stops there.** Our current `KEYRUPT_LO/HI = 04024..04046` window doesn't cover the handler body. So we see the engine fall through `TCF KEYRUPT1` and... go somewhere we don't observe.
+**Current framing — the bug is at boot, before any keypress:**
 
-So the first framing (bug downstream of KEYRUPT1 lead-in) appears to be the right one after all. The `077615 bad CADR` may or may not be the actual symptom — needs re-verification once we can see the KEYRUPT1 body executing.
+After capturing a full KEYRUPT1 ISR via the new follow-ISR tracer (commit `f14d954`), the entire chain works:
+| Step | Z | Operation | Observed |
+|---|---|---|---|
+| Lead-in | 04024-04027 | DXCH ARUPT / CAF KEYRPTBB / XCH BBANK / TCF KEYRUPT1 | ✓ |
+| Handler body (bank 4) | 03274-03277 | TS BANKRUPT / XCH Q / TS QRUPT / TC LODSAMPT | ✓ |
+| LODSAMPT (bank 2 fixed-fixed) | 04400-04403 | time-snatch | ✓ |
+| Handler continues | 03300-03307 | CAF LOW5 / EXTEND / **RAND MNKEYIN** / TS RUPTREG4 / flag manipulation | `A=00022` ✓ keycode reaches A |
+| ACCEPTUP | 03310 | TC NOVAC, sets Q=03311 | ✓ |
+| NOVAC | 05072-05077 | INHINT / AD FAKEPRET / TS NEWPRIO / EXTEND / INDEX Q | ✓ |
+| **DCA 0** | 05100 | reads two words at Q=03311 in bank 4 → `A=02077, L=60101` | ✓ these *are* the real 2CADR CHARIN words at the actual location (bank 4 offset 01311, NOT the fixed-fixed 04041/04042 that the now-invalid `test_cadr_resolution.c` assumed) |
+| NOVAC2 + FINDSLOT | 02625-02670 (bank 2) | slot allocation | ✓ a slot gets allocated |
+| RESUME | 05270-05276 | exits ISR | ✓ |
+
+**The actual problem:** `PRIORITY[0]=030110 CADR[0]=00000` was already set **before the keypress arrived**, and was **unchanged** by the entire KEYRUPT1 ISR. NOVAC2 didn't write to slot 0 because the slot was already "occupied" (PRIO is positive, not the `077777=-0` "free" sentinel). NOVAC2 must have used a different slot.
+
+The 077615 corruption seen in `test_executive_state.c` and at the start of subsequent KEYRUPT1 ISRs comes from between RESUME of one ISR and the next ChannelRoutine: the executive job-search picks slot 0 (highest priority `030110`), tries to dispatch to CADR=0, runs garbage from address 0 (= RegA), eventually corrupts CADR[0] to 077615.
+
+So the chain is:
+1. **Boot** → Luminary's FRESH-START → first NOVAC call somewhere → slot 0 gets `PRIO=030110 CADR=00000` (the CADR write didn't take, even though the PRIO write did).
+2. **Executive runs** → finds slot 0 highest priority → dispatches to CADR=0 → runs garbage → writes 077615 to some cell that happens to be CADR[0].
+3. **Keypress arrives** → KEYRUPT1 → NOVAC2 → schedules CHARIN to slot 1 or higher (slot 0 marked occupied).
+4. **Executive runs again** → STILL picks slot 0 (highest priority, beats slot N's CHARIN at same priority by index tiebreaker) → garbage continues → CHARIN never gets to run.
+
+That's why no keypress has visible effect: CHARIN is *scheduled* in a non-0 slot but never *dispatched* because slot 0's ghost permanently outranks it.
 
 ## What works (don't break)
 
@@ -43,57 +55,44 @@ From `CONFIG_AGC_TRACE_KEYRUPT1=y` build, UART captured at 115200 baud on COM7:
 - Zero entries with `Z` in `04024..04027` (the KEYRUPT1 lead-in window).
 - Auto-RSET fires at tick 16 (~2.5s); `channel_router: auto-RSET posted at boot` line confirms `channel_router_post_key(DSKY_KEY_RSET)` ran. But no KEYRUPT1 trace entry follows it.
 
-## Hypotheses for why CHARIN doesn't run after KEYRUPT1 dispatches
+## Hypotheses for the boot-time slot-0 ghost
 
-(Replacing the now-invalidated "never dispatches" section.)
+The ghost has `PRIO=030110 CADR=00000`. PRIO=030110 = CHRPRIO(030000) + FAKEPRET(00110). That's the priority NOVAC produces for a CHARIN-scheduled job. So at boot, **something called NOVAC with `A=030000` (CHRPRIO), but the 2CADR words at the indexed Q location were zero**.
 
-Once `TCF KEYRUPT1` fires (last instruction of the lead-in at `04027`), the PC jumps to the handler body that lives in switched-bank fixed memory. We do NOT trace that range yet. The handler is:
+1. **An early NOVAC call hits zero-padded 2CADR words.** The most likely scenario. During FRESH-START (`FRESH_START_AND_RESTART.agc`), Luminary calls NOVAC to schedule a startup job. That `TC NOVAC` is followed by a `2CADR` directive. yaYUL expands the 2CADR to two specific words. If our ROM-loader misplaces those words (off-by-one, wrong bank, wrong byte order at that specific page), the engine's `INDEX Q; DCA 0` reads zeros. Verify: trace earliest NOVAC call during boot (before any keypress); compare A/L after the DCA against expected encoded values.
 
-```
-KEYRUPT1   TS BANKRUPT       ; save BBANK
-           XCH Q              ; save Q -> QRUPT
-           TS QRUPT
-           TC LODSAMPT        ; snapshot time
-           CAF LOW5
-           EXTEND
-           RAND MNKEYIN       ; pull 5-bit keycode from ch015
-KEYCOM     TS RUPTREG4
-           CS FLAGWRD5
-           MASK DSKYFBIT
-           ADS FLAGWRD5
-ACCEPTUP   CAF CHRPRIO        ; A = priority constant
-           TC NOVAC           ; schedule CHARIN as a NEW JOB
-           EBANK= DSPCOUNT
-           2CADR CHARIN
-           CA RUPTREG4
-           INDEX LOCCTR
-           TS MPAC
-           TC RESUME
-```
+2. **The 2CADR address calculation in our engine has a banking error specific to one of the FRESH-START callers.** The KEYRUPT1 case works (its 2CADR reads 02077/60101 correctly). Some other NOVAC call site might be in a bank where our engine resolves `INDEX Q` wrong. Verify: trace EVERY NOVAC call from boot, log A/L post-DCA.
 
-(`Luminary099/KEYRUPT,_UPRUPT.agc:39-59`.) Live hypotheses:
+3. **Luminary's FRESH-START specifically expects PRIORITY slots pre-set to `077777` (-0 = free) before it runs.** Our `agc_init.c` zeroes all erasable. Zero means "occupied at priority 0" — a real (lowest-priority) job. If Luminary's first NOVAC call iterates slots looking for free (=-0), it skips slot 0 because slot 0 isn't free; falls through; eventually overwrites slot 0 partially. Verify: try a one-line fix in `agc_init.c` that initializes `Erasable[0][0167 + slot*014] = 077777` for slots 0-7 before letting the engine run. If the ghost disappears and CHARIN starts dispatching, this is it.
 
-1. **TC LODSAMPT / RAND MNKEYIN reads the wrong value from ch015.** Our `channel_router_pump_input` writes the keycode via `WriteIO(state, 015, code & 037)` then sets `InterruptRequests[5]=1`. If `WriteIO`'s ch015 side-effect mutates the value before the handler reads it, RAND would see a wrong code. Verify: log `state->InputChannel[015]` at the moment of `RAND MNKEYIN` execution.
+4. **Our `peripheral_stub_tick` writes to a cell that overlaps PRIORITY[0]+CADR[0].** The stub does `Erasable[0][0375..0377] = 0` (FAILREG zeroing) and `Erasable[2][036] &= ~mask` (DSPTAB+11D). Neither overlaps with 0167/0170. But verify by binary-disabling `peripheral_stub_tick` temporarily and observing whether the slot-0 ghost still appears.
 
-2. **NOVAC reads the 2CADR words at Q+0/Q+1 from the wrong bank.** This is the original `077615` hypothesis, now back on the table. Our trace already shows Q at the moment of dispatch (e.g. `Q=02471` for the second keypress observed). After `TC NOVAC` runs, Q should be `04041` (just past the TC). NOVAC's `INDEX Q; DCA 0` should then read `Fixed[2][041..042] = 034062, 056006`. If banking is off, it could read garbage. Verify: extend tracer window to capture the NOVAC body, not just the KEYRUPT1 lead-in.
-
-3. **Slot allocation in NOVAC2 writes to a wrong PRIORITY index.** After NOVAC2 figures out which slot is free, it stores PRIO and CADR via `INDEX NEWJOB; TS PRIORITY` etc. If `NEWJOB` is wrong-banked or computed wrong, CADR lands in an unrelated cell. Verify: dump the entire PRIORITY array at the moment NOVAC2 completes.
-
-4. **CHARIN's first instruction faults silently.** CHARIN at `PINBALL_GAME__BUTTONS_AND_LIGHTS.agc:475` starts `CAF ONE; XCH DSPLOCK; TS 21/22REG`. If `DSPLOCK` resolves to the wrong erasable cell, the executive's lock-tracking breaks immediately. Verify: trace through CHARIN's first ~10 instructions.
+Hypothesis 3 is the cheapest to test (1 line) and matches the symptom most directly. Try first.
 
 ## Concrete next-session work
 
-1. **Widen the KEYRUPT1 trace window** to cover the handler body, not just the 04024-04046 lead-in. The handler lives in a switched bank — we know FBANK at the moment of dispatch (FB=11000 octal observed). Two approaches:
-   - Hardcode the handler address range. `KEYRUPT1` (the label) is in `KEYRUPT,_UPRUPT.agc` after `SETLOC KEYRUPT`. The actual fixed address depends on what `KEYRUPT` is defined as — derive from `MAIN.agc.html` or by re-running yaYUL with listing.
-   - Or: latch the trace into "follow ISR" mode the moment we see `Z=04024 isr=1`, then dump every instruction until `InIsr` transitions to 0. This is simpler but produces 100-500 log lines per keypress. Acceptable for a focused diagnostic — keypress rate is low.
+1. **Try hypothesis 3 first — the 077777 init fix.** In `components/agc_core/agc_init.c::init_cpu_state`, after the erasable zero-clear, add:
+   ```c
+   // Mark all 8 executive PRIORITY slots as free (AGC convention: -0 = 077777).
+   // Without this, slots are 0 = "occupied at priority 0" = dispatchable
+   // (priority 0 is the lowest, but the executive still finds them).
+   // Luminary's FRESH-START scheduler iterates looking for free slots
+   // and may not handle the zeroed state we leave.
+   for (int slot = 0; slot < 8; slot++) {
+       State->Erasable[0][0167 + slot * 014] = 077777;
+   }
+   ```
+   Build, flash, observe whether the boot-time ghost (PRIO[0]=030110 CADR[0]=0) still appears in the trace. If it goes away and CHARIN starts dispatching after a keypress — done.
 
-2. **Make the keyrupt log include `RegA`/`RegL`/`InputChannel[015]` at every step.** When the handler executes `RAND MNKEYIN`, we want to see the masked keycode in A right after. If A reads as 0 (or anything other than 022 octal for an RSET press), the keycode path is broken before NOVAC.
+2. **If hypothesis 3 fails — trace every boot-time NOVAC call.** Re-enable `CONFIG_AGC_TRACE_KEYRUPT1=y` AND extend the trace to fire on `Z == 05072` (NOVAC entry address, observed this session) regardless of `InIsr`. Capture from cycle 0 onwards. The first NOVAC call's A/L post-DCA will tell us whether the bug is engine 2CADR fetch (hypothesis 2) or ROM-load (hypothesis 1).
 
-3. **After NOVAC's `DCA 0` instruction, log A:L (the 2CADR words).** Compare against the known-good ROM values `Fixed[2][041]=034062, Fixed[2][042]=056006` (per `test_cadr_resolution`). Mismatch → engine fetch bug (hypothesis 2). Match → slot allocation bug (hypothesis 3) is the next thing to investigate.
+3. **Add a real assertion-bearing host test** for the slot-0 ghost: boot the engine, step ~200k cycles, assert that `Erasable[0][0167] == 077777` OR a valid CADR is also present (`Erasable[0][0170] != 0`). Currently `test_executive_state.c` just prints; turn it into a pass/fail. This becomes the regression guard for the fix.
 
-4. **Spurious-keypress note**: the second keypress observed in this session was `code=07`, NOT posted by anything in our code. Likely the XPT2046 touch driver registering noise. Worth muting (a debounce / sanity threshold in `components/dsky_input/touch.c` or wherever the touch task posts keys) so we're not chasing ghost dispatches in future traces. Not the main bug, but adds noise to UART captures.
+4. **Once the ghost is gone, the V35E lamp test should "just work."** Drive `V`, `3`, `5`, `E` via curl POST → all DSKY segments light up. That unblocks Phase 1 verification. Replace the assertion-free `tests/host/test_lamp_test.c` and `test_p00_select.c` with real-assertion versions (P1.5 from this session's plan, already a task but not started).
 
-5. **Cleanup**: once a fix lands, decide whether to keep `CONFIG_AGC_TRACE_KEYRUPT1` (probably yes, as `=n` it's free) and `test_cadr_resolution.c` (probably yes, as a standalone diagnostic). Add a real assertion-bearing host test for V35E lamp test once it works.
+5. **Note: `test_cadr_resolution.c` is now obsolete.** It was checking `Fixed[2][041..042]` assuming TC NOVAC was at fixed-fixed 04040. The actual TC NOVAC in Luminary099 is at 03310 (banked bank 4) and the 2CADR is at bank 4 offset 01311. Either delete the test or rewrite it to check the actual location.
+
+6. **Spurious-keypress note**: a second keypress (`code=07`) appeared in trace this session without anything in code posting it. Touch task noise. Debounce/threshold in `components/dsky_input/touch.c` would fix it. Not urgent.
 
 ## Files to read first next session
 
