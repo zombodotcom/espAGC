@@ -60,20 +60,20 @@
 #define DSPTAB_GL_NOATT       (DSPTAB_NOATT | DSPTAB_GIMBAL_LOCK)
 #define DSPTAB_REQUEST        040000u
 
-// Boot-time channel values matching lm_simulator.tcl's set_ini_values
-// (Contributed/LM_Simulator/lm_simulator.tcl:570-572). These are the
-// EXACT values LM_Simulator writes to a yaAGC instance over its TCP
-// socket at startup on Pi/Linux, before any user interaction:
+// Boot-time channel values matching the recorded Apollo 11 launch
+// (third_party/virtualagc/yaDSKY2/Apollo11-launch.canned) at time 0.
+// This is the bit-for-bit channel state Luminary saw at boot in a
+// known-working Apollo 11 launch. The recording then shows ch30
+// transitioning to 37357 / 37356 / 37357 as the ISS turn-on sequence
+// progresses — those transitions are driven by Luminary's own state
+// machine in response to its boot-time outputs, not by the simulator.
 //
-//   wdata(30) "011110011011001" = 0o36331
-//   wdata(31) "111111111111111" = 0o77777
-//   wdata(32) "010001111111111" = 0o21777
-//   wdata(33) "101111111111110" = 0o57776
-//
-// We use these values verbatim so our peripheral simulator presents
-// the same fresh-start input the Pi/Linux Luminary expects to see.
-#define LM_SIM_CH030  036331   // lm_simulator.tcl wdata(30) default
-#define LM_SIM_CH031  077777   // lm_simulator.tcl wdata(31) default
+// LM_Simulator's set_ini_values (lm_simulator.tcl:570-572) has slightly
+// different ch30/ch31 defaults (036331/077777) but those produce more
+// ch30/IMODES30 XOR mismatches that thrash T4RUPT's IMUMON loop. The
+// recorded launch values are the truer fresh-start state.
+#define LM_SIM_CH030  037377   // Apollo11-launch.canned at time 0
+#define LM_SIM_CH031  057777   // Apollo11-launch.canned at time 0
 #define LM_SIM_CH032  021777   // lm_simulator.tcl wdata(32) default
 #define LM_SIM_CH033  057776   // lm_simulator.tcl wdata(33) default
 
@@ -105,19 +105,6 @@ void peripheral_stub_init(void)
 
     g_step_time_us = 0;
     g_pulse_phase  = 0;
-
-    // One-shot CDU burst at boot. Queues a handful of PCDU pulses into
-    // the engine's CDU FIFO. The engine drains these at the hardware
-    // PCDU rate (~213 MCTs per pulse, slow mode) which is enough to
-    // unblock 1/ACCS without causing the continuous-stream TC-Trap
-    // GOJAMs we saw with periodic pulses (150 TCTraps / 1M cycles in
-    // diagnostic runs). Each axis gets 8 pulses ≈ enough to advance
-    // CDUX/Y/Z past 0 and let GOODEPS1's arithmetic resolve.
-    for (int i = 0; i < 8; i++) {
-        UnprogrammedIncrement(state, 032, 1);  // CDUX PCDU
-        UnprogrammedIncrement(state, 033, 1);  // CDUY PCDU
-        UnprogrammedIncrement(state, 034, 1);  // CDUZ PCDU
-    }
 }
 
 // PCDU counter addresses (Block II AGC, per agc_engine.c FIRST_CDU=032).
@@ -180,37 +167,9 @@ void peripheral_stub_step(agc_t *state, uint32_t dt_us)
 
 void peripheral_stub_tick(agc_t *state)
 {
-    if (state == NULL) return;
-
-    // Drive the periodic simulation step. The legacy tick from
-    // channel_router_on_routine() comes about once per 16 k engine
-    // cycles, which at ~12 us per cycle is ~200 ms — slower than the
-    // 10 ms LM_Simulator cadence but enough to demonstrate the
-    // infrastructure. Hardware will spawn a dedicated 100 Hz task too.
-    // Re-assert channel baselines.
-    state->InputChannel[030] = LM_SIM_CH030;
-    state->InputChannel[033] = LM_SIM_CH033;
-    // IMODES restore intentionally OMITTED — forcing IMODES30/IMODES33 to
-    // FRESH values every tick interferes with Luminary's mode-switch
-    // bookkeeping and triggered repeated TC Trap GOJAMs in earlier runs.
-    // Luminary normally maintains these cells through its own routines.
-
-    // (2) Host-side ERROR: if the boot-time NW trip latched the PROG
-    // ALARM lamp and our KEYRUPT-driven RSET didn't clear it (CHARIN
-    // not being dispatched - see SESSION_NOTES), clear it here. Only
-    // act if the alarm code in FAILREG[0] is the known-benign NW code;
-    // any other alarm represents a real fault that should stay visible.
-    int failreg0 = state->Erasable[FAILREG_BANK][FAILREG0_OFFSET];
-    if (failreg0 == ALARM_NIGHT_WATCHMAN) {
-        // Equivalent of ERROR lines 3752-3755:
-        //   CAF GL+NOATT ; MASK DSPTAB+11D ; AD BIT15 ; TS DSPTAB+11D
-        unsigned dsp = state->Erasable[DSPTAB11D_BANK][DSPTAB11D_OFFSET];
-        dsp = (dsp & DSPTAB_GL_NOATT) | DSPTAB_REQUEST;
-        state->Erasable[DSPTAB11D_BANK][DSPTAB11D_OFFSET] = dsp;
-
-        // Equivalent of ERROR lines 3796-3799: zero FAILREG[0..2].
-        state->Erasable[FAILREG_BANK][FAILREG0_OFFSET] = 0;
-        state->Erasable[FAILREG_BANK][FAILREG1_OFFSET] = 0;
-        state->Erasable[FAILREG_BANK][FAILREG2_OFFSET] = 0;
-    }
+    // Periodic tick currently disabled to isolate alarm sources. Pi/Linux
+    // LM_Simulator writes ch030/ch031/ch032/ch033 every ~25ms; if we
+    // re-enable, do it at a comparable rate. The peripheral_stub_init
+    // already set the initial values once, which is enough to boot.
+    (void)state;
 }

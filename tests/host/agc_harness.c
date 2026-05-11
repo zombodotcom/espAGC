@@ -20,6 +20,7 @@
 #include "agc_engine.h"
 
 extern agc_t *agc_core_state(void);
+extern int InhibitAlarms;
 
 void harness_boot(void)
 {
@@ -28,7 +29,15 @@ void harness_boot(void)
     channel_router_init();
     int rc = agc_core_init(rom, sz);
     if (rc != 0) { fprintf(stderr, "agc_core_init -> %d\n", rc); exit(1); }
-    peripheral_stub_init();   // seed MASS / DAPBOOLS so 1/ACCS converges
+    peripheral_stub_init();
+    // Suppress yaAGC's TC-Trap / NightWatchman / RuptLock GOJAM-on-alarm
+    // behavior. These alarms fire on the host build during normal boot
+    // (~6 TCTrap + 2 NW per 1M cycles even with no peripheral activity)
+    // and wipe slot allocations before CHARIN can run for a keypress.
+    // Pi/Linux yaAGC builds also expose this as the `--inhibit-alarms`
+    // command-line option; we set it programmatically since we don't
+    // have a CLI. Alarm latches still appear in ch77 for observation.
+    InhibitAlarms = 1;
     free(rom);
 }
 

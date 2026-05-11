@@ -1,6 +1,13 @@
-# Next session — TC Trap GOJAMs are wiping CHARIN allocations
+# Next session — slot 0 (1/ACCS) hogs CPU; CHARIN can't preempt
 
 Last touched: 2026-05-11. Test suite green (`mingw32-make run`: ALL PASS).
+
+## Updates this iteration
+
+- **Channel wdata reverted to Apollo11-launch.canned values**: `ch030=037377 ch031=057777` (was `036331/077777`). The canned values cause ZERO TC-Trap alarms vs ~150 with LM_Simulator's wdata defaults. The launch recording is the truer fresh-start state.
+- **yaAGC alarm inhibit enabled in test harness**: `tests/host/agc_harness.c` sets `InhibitAlarms = 1` after `agc_core_init`. This is yaAGC's documented `--inhibit-alarms` option used on Pi/Linux for development. Still lets alarms latch in ch77 for observation but skips the GOJAM-on-alarm.
+- **peripheral_stub_tick simplified to a no-op** — earlier the periodic tick re-asserted ch030/ch033 and forced IMODES30/IMODES33 to fresh values, which contributed to alarm storms. `peripheral_stub_init` sets the initial channel state and that's enough.
+- **New diagnostics**: `test_charin_arrival`, `test_slot0_evolve`, `test_newjob_trace`, `test_very_long`. Together they prove slot 0 IS executing 1/ACCS (not stuck — LOC progresses through bank-20 offsets 02447, 02450, 02451, …, 03425, …) but never reaches `ENDOFJOB`, so CHARIN at slot 1 with PRIO=30110 never gets CPU even though NEWJOB=014 is set.
 
 ## Root cause identified this session
 
