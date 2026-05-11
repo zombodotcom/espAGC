@@ -21,8 +21,7 @@ idf_component_register(
         "agc_init.c"
         "io_callbacks.c"
         "posix_shim.c"
-    INCLUDE_DIRS "include"
-    PRIV_INCLUDE_DIRS "${YAAGC_DIR}"
+    INCLUDE_DIRS "include" "${YAAGC_DIR}"
     REQUIRES channel_router
 )
 
