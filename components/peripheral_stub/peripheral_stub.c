@@ -484,17 +484,4 @@ void peripheral_stub_tick(agc_t *state)
 
     rescue_stuck_job(state);
     dispatch_pending_charin(state);
-
-    // Continuously assert RCSFLAGS bit 13. DAPIDLER's T5RUPT checks
-    // this bit and only NOVACs 1/ACCSET if it's CLEAR. FRESH_START
-    // explicitly clears it (FRESH_START_AND_RESTART.agc:430), but
-    // we keep re-setting it from outside so DAPIDLER takes the
-    // CHECKUP branch instead of allocating 1/ACCSET — which is the
-    // job that gets stuck in V67WW INTWAKE loop. Only re-assert AFTER
-    // at least one rescue has fired, so we don't perturb the very
-    // first FRESH_START's setup.
-    // RCSFLAGS at erasable 01273 = Erasable[2][0273]. BIT13 = 04000.
-    if (g_rescue_count > 0) {
-        state->Erasable[2][0273] |= 04000;
-    }
 }
