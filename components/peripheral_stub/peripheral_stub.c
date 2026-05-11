@@ -345,7 +345,11 @@ void peripheral_stub_step(agc_t *state, uint32_t dt_us)
 // T5RUPT. The rescue fires again on the next stuck detection. Cap at
 // MAX_RESCUES to avoid runaway GOJAM if something else is broken.
 #define STUCK_THRESHOLD   2
-#define MAX_RESCUES       16
+// One-shot rescue at boot: get past the initial 1/ACCSET deadlock.
+// After that, normal Luminary dispatch handles things — additional
+// rescues risk killing legitimate verb-execution flows that hold
+// NEWJOB while waiting for user input (V37 REQMM, etc.).
+#define MAX_RESCUES       1
 static int      g_last_newjob   = 0;
 static int      g_stuck_count   = 0;
 static int      g_rescue_count  = 0;
