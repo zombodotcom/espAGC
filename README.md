@@ -13,17 +13,21 @@ The emulator core is yaAGC. License is **GPL v2** (carries through from yaAGC).
 | Layer 2b — renderer pixel tests | **2/2 PASS** | Blank frame FNV-1a hash, region assertions for lit PROG/VERB/NOUN cells |
 | `yaagc_ref` | **builds, runs** | Reference harness using upstream `agc_engine_init.c` directly — links `NullAPI.c` to bypass the socket layer. Run `./yaagc_ref.exe` to see vanilla yaAGC's cold-boot behavior for comparison. |
 | Layer 3 — QEMU | **deferred** | No QEMU support for ESP32-C5/WROOM in any released QEMU; covered by Layer 2 instead |
-| Layer 4 — hardware | **boots, COMP ACTY runs** | Firmware brings up the ST7789 panel, loads Luminary099, joins WiFi (or falls back to a SoftAP `espAGC`), and accepts taps on the on-screen 19-key keypad. COMP ACTY lamp confirms the executive is dispatching jobs. V35E digit display does not render yet — see "Known limitations" below. |
+| Layer 4 — hardware | **boots, V35E works** | Firmware brings up the ST7789 panel, loads Luminary099, joins WiFi (or falls back to a SoftAP `espAGC`), and accepts taps on the on-screen 19-key keypad. V35E lamp test renders end-to-end (VERB=35, then all digits = 88888 with status lamps lit, per Block II spec). |
 
 DSKY output renders as a 320×240 framebuffer on the ST7789 panel — status panel, register window, and an on-screen 19-key keypad backed by the XPT2046 resistive touchscreen. No LVGL — direct framebuffer in 80-row strips, three passes per frame.
 
-## Known limitations
+## How V35E works — the cold-boot recovery
 
-**V35E lamp test and other DSKY verbs do not render digits yet.** Root cause (verified via `yaagc_ref` against vanilla yaAGC): cold-boot Luminary099 without a `--resume` core-dump file or a connected LM_Simulator socket peer enters a deadlock. 1/ACCSET (PRIO=27110, allocated by DAPIDLER's first T5RUPT) executes interpretive code that gets caught in `INTERPRETER.agc:681` GOTO indirection (POLISH=0 dereferencing zero scratch storage). Block II AGC is non-preemptive, so CHARIN (allocated on keypress) can never take CPU.
+Cold-boot Luminary099 on yaAGC has a documented deadlock without a `--resume` core-dump file or a connected LM_Simulator socket peer. 1/ACCSET (PRIO=27110, allocated by DAPIDLER's first T5RUPT) executes interpretive code that gets caught in `INTERPRETER.agc:681` GOTO indirection — POLISH=0 dereferencing zero scratch storage indefinitely. Block II AGC is non-preemptive, so CHARIN (allocated on keypress) can never take CPU. Vanilla yaAGC has the same problem (verified via `yaagc_ref` — see Reference harness section).
 
-**Our mitigation** (`peripheral_stub_tick` in `components/peripheral_stub/peripheral_stub.c`): detect persistent NEWJOB and trigger a simulated GOJAM matching `agc_engine.c:2246-2298`. This recovers the engine — COMP ACTY lamp lights up and the executive resumes dispatching. After rescue, RCSFLAGS bit 13 is kept asserted so DAPIDLER's CHECKUP path doesn't re-NOVAC 1/ACCSET.
+`peripheral_stub_tick` (in `components/peripheral_stub/peripheral_stub.c`) provides two-stage recovery:
 
-**What remains:** post-rescue, duplicate CHARIN allocations at the same priority (PRIO=30110) can block dispatch when a stale slot is "active" and a fresh CHARIN slot is "waiting." A targeted slot-deduplication step in the rescue path is the cleanest fix and is the next intended commit.
+1. **GOJAM-rescue.** When NEWJOB stays the same across consecutive ticks (executive wants to swap but can't), trigger a simulated GOJAM matching `agc_engine.c:2246-2298`. After the first rescue, RCSFLAGS bit 13 is kept asserted so DAPIDLER's CHECKUP path doesn't re-NOVAC 1/ACCSET.
+
+2. **CHARIN dispatch injection.** Each tick, scan the 7 inactive job slots for one matching CHARIN's signature (PRIO=30110, LOC=02077, BANKSET=060101). If found and the active slot is stale (same priority or lower), manually copy the CHARIN slot's state into the active set (a software CHANG2), and set RegZ/FBANK/EBANK/SBANK so the engine starts executing CHARIN's first instruction immediately. This bypasses the cooperative-scheduling deadlock that real LM_Simulator avoids via continuous socket-injected counter pulses.
+
+Result: keypresses reach CHARIN, CHARIN updates VERBREG/NOUNREG/DSPCOUNT and writes ch010 row 10 (VERB digits). V35 LAMP TEST runs the full sequence (all digits → "8", status lamps lit, 5-second pause, lamps off).
 
 ## Boot behavior — the PROG ALARM caveat
 
