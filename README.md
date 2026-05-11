@@ -112,6 +112,27 @@ Hold the boot button at reset to switch ROM to Comanche055.
 - **Touchscreen**: tap the on-screen 19-key keypad. Same key set as the WiFi web UI.
 - **WiFi web UI**: connect to the network configured in `idf.py menuconfig` → espAGC WiFi (or to the open AP `espAGC` if no SSID is set), browse to `http://<dongle-ip>/` (or `http://192.168.4.1/` in SoftAP mode). SPA has a 19-button DSKY keypad, physical-keyboard shortcuts, and a one-click menu of canned sequences (lamp test, P00 select, RSET, etc.).
 
+### What verbs work — try these first
+
+| Sequence | Type | What you'll see |
+|---|---|---|
+| **V35E** (lamp test) | works ✅ | After V then 3 then 5: VERB digits show "35". After E: all six digit pairs show "88" and every status lamp lights for ~5 sec, then turns off |
+| **R** (RSET) | works ✅ | Clears RESTART lamp |
+| **V37E…E** (program select) | partial ⚠️ | Verb display shows "37" correctly after `V 3 7 E`, but the trailing program-number digits (e.g., `00 E` for P00) don't currently complete. Investigation in `tests/host/test_v37e00e_full.c` and `test_v37_slots.c` |
+
+V35E is the headline demo — it exercises CHARIN dispatch, lamp test verb 35, ch010 row-by-row digit + lamp output, and the full DSKY render pipeline end-to-end.
+
+### Diagnostic tests (run on host without hardware)
+
+```powershell
+cd tests\host
+mingw32-make diag                       # build all diagnostic binaries
+ROM=../../build/roms/Luminary099.bin ./test_v35e_full.exe         # step-by-step V35E
+ROM=../../build/roms/Luminary099.bin ./test_charin_dispatch.exe   # CHARIN slot allocation
+ROM=../../build/roms/Luminary099.bin ./test_v37_slots.exe         # V37 sequence + slot dump
+ROM=../../build/roms/Luminary099.bin ./yaagc_ref.exe              # vanilla yaAGC baseline
+```
+
 ## Host tests
 
 Three layers of host tests run in ~2 seconds total. No hardware required.
