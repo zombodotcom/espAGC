@@ -52,62 +52,88 @@ static void dispatch_trace_step(agc_t *State)
     for (int i = 1; i <= 10; i++) prev_reqs[i] = State->InterruptRequests[i];
 }
 
-// KEYRUPT1 lives at fixed-fixed 04024 and runs through 04046 (TC RESUME).
-// The interesting window is the full KEYRUPT1 body plus the first instr
-// of NOVAC. See tests/host/test_cadr_resolution.c header for the byte-by
-// -byte counting. Bank 2 fixed-fixed covers addresses 04000..05777,
-// indexed as State->Fixed[2][addr - 04000].
-#define KEYRUPT_LO 04024
-#define KEYRUPT_HI 04046
-
+// KEYRUPT1 lead-in lives at fixed-fixed 04024 (per
+// Luminary099/INTERRUPT_LEAD_INS.agc:60-63). After the `TCF KEYRUPT1`
+// at 04027, control jumps to the actual handler in switched-bank
+// fixed memory — outside the 04024..04046 lead-in window. To follow
+// the full handler → NOVAC → NOVAC2 → CHARIN(?) chain we latch on
+// ISR-entry-at-04024 and log every instruction until InIsr drops
+// back to 0 (RESUME). Per-instruction dedup (compare RegZ to last)
+// prevents the engine's "ChannelInput called multiple times per
+// instruction" pattern from flooding UART. Expected: 50-300 lines
+// per keypress.
+//
+// Watched erasable cells (one-shot deltas printed when they change):
+//   DSPLOCK   @ bank 2 offset 012  — CHARIN's `XCH DSPLOCK` sets it
+//   PRIO[0]   @ bank 0 offset 0167 — NOVAC slot allocation
+//   CADR[0]   @ bank 0 offset 0170 — slot 0 CADR after NOVAC2
 static void keyrupt_trace_step(agc_t *State)
 {
-    int z = State->Erasable[0][RegZ];
-    static bool in_window = false;
-    if (z < KEYRUPT_LO || z > KEYRUPT_HI) {
-        in_window = false;
+    static bool following     = false;
+    static int  last_z        = -1;
+    static int  last_dsplock  = -1;
+    static int  last_prio0    = -1;
+    static int  last_cadr0    = -1;
+
+    int z   = State->Erasable[0][RegZ];
+    int isr = State->InIsr;
+
+    // ENTRY: ISR running at KEYRUPT1 lead-in entry
+    if (!following && isr && z == 04024) {
+        following     = true;
+        last_z        = -1;
+        last_dsplock  = State->Erasable[2][012];
+        last_prio0    = State->Erasable[0][0167];
+        last_cadr0    = State->Erasable[0][0170];
+        ESP_LOGI(KEYRUPT_TAG, "==KEYRUPT1 ENTRY== ch015=%05o DSPLOCK=%05o PRIO[0]=%05o CADR[0]=%05o",
+                 State->InputChannel[015] & 077777,
+                 last_dsplock & 077777, last_prio0 & 077777, last_cadr0 & 077777);
+    }
+    if (!following) return;
+
+    // EXIT: ISR completed
+    if (!isr) {
+        ESP_LOGI(KEYRUPT_TAG, "==RESUME== back to Z=%05o DSPLOCK=%05o PRIO[0]=%05o CADR[0]=%05o",
+                 z, State->Erasable[2][012] & 077777,
+                 State->Erasable[0][0167] & 077777,
+                 State->Erasable[0][0170] & 077777);
+        following = false;
         return;
     }
-    // Re-arm: we want to see EVERY instruction inside the window, not
-    // just the first one. The latch only suppresses re-entry chatter on
-    // the SAME instruction across non-stepping calls (ChannelInput can
-    // be called more than once per actual engine step depending on
-    // engine internals).
-    (void)in_window;
-    in_window = true;
+
+    // Watched-cell delta notes (fire BEFORE the per-instruction line
+    // so the cell change is attributed to the instruction that just ran)
+    int dsplock = State->Erasable[2][012];
+    int prio0   = State->Erasable[0][0167];
+    int cadr0   = State->Erasable[0][0170];
+    if (dsplock != last_dsplock) {
+        ESP_LOGI(KEYRUPT_TAG, "  >> DSPLOCK %05o -> %05o", last_dsplock & 077777, dsplock & 077777);
+        last_dsplock = dsplock;
+    }
+    if (prio0 != last_prio0) {
+        ESP_LOGI(KEYRUPT_TAG, "  >> PRIO[0] %05o -> %05o", last_prio0 & 077777, prio0 & 077777);
+        last_prio0 = prio0;
+    }
+    if (cadr0 != last_cadr0) {
+        ESP_LOGI(KEYRUPT_TAG, "  >> CADR[0] %05o -> %05o", last_cadr0 & 077777, cadr0 & 077777);
+        last_cadr0 = cadr0;
+    }
+
+    // Per-instruction dedup
+    if (z == last_z) return;
+    last_z = z;
 
     int a    = State->Erasable[0][RegA] & 077777;
     int l    = State->Erasable[0][RegL] & 077777;
     int q    = State->Erasable[0][RegQ] & 077777;
     int fb   = State->InputChannel[004] & 077777;
     int bb   = State->InputChannel[006] & 077777;
-    int isr  = State->InIsr;
+    int eb   = State->InputChannel[003] & 07;
     int ec   = State->ExtraCode;
 
-    // Decode Q -> a Fixed[] cell. In fixed-fixed (04000-07777), Q indexes
-    // Fixed[2] or Fixed[3] regardless of FBANK. Otherwise FBANK selects
-    // the bank (bits 14:10 of FBANK channel register). Be defensive: if
-    // Q is out of range, log zeros for word_q/word_q1 rather than reading
-    // out of bounds.
-    int word_q = 0, word_q1 = 0;
-    if (q >= 04000 && q <= 05777) {
-        word_q  = State->Fixed[2][q     - 04000] & 077777;
-        word_q1 = State->Fixed[2][(q+1) - 04000] & 077777;
-    } else if (q >= 06000 && q <= 07777) {
-        word_q  = State->Fixed[3][q     - 06000] & 077777;
-        word_q1 = State->Fixed[3][(q+1) - 06000] & 077777;
-    } else if (q >= 02000 && q <= 03777) {
-        int bank = (fb >> 10) & 037;
-        if (bank < 40) {
-            word_q  = State->Fixed[bank][q     - 02000] & 077777;
-            word_q1 = State->Fixed[bank][(q+1) - 02000] & 077777;
-        }
-    }
-
     ESP_LOGI(KEYRUPT_TAG,
-             "Z=%05o FB=%05o BB=%05o A=%05o L=%05o Q=%05o isr=%d ec=%d "
-             "[Q]=%06o [Q+1]=%06o",
-             z, fb, bb, a, l, q, isr, ec, word_q, word_q1);
+             "Z=%05o A=%05o L=%05o Q=%05o FB=%05o BB=%05o EB=%o ec=%d",
+             z, a, l, q, fb, bb, eb, ec);
 }
 #endif
 
