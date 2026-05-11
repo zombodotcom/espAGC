@@ -209,6 +209,15 @@ void peripheral_stub_init(void)
     state->Erasable[2][0244] = 05050;   // MASS high word (FULLAPS)
     state->Erasable[2][0245] = 0;       // MASS low word
 
+    // RCSFLAGS bit 13 — DAPIDLER checks this on every T5RUPT to decide
+    // whether to NOVAC 1/ACCSET. If clear, NOVAC fires at PRIO27,
+    // creating a long-running job in slot 0 that starves CHARIN. If set,
+    // DAPIDLER goes straight to CHECKUP. Pre-setting it skips the
+    // 1/ACCSET dance entirely — we already pre-loaded MASS and force
+    // ACCSOKAY, so DAPIDLER's downstream logic still works.
+    // RCSFLAGS at erasable 01273 = Erasable[2][0273]. BIT13 = 04000.
+    state->Erasable[2][0273] |= 04000;
+
     g_step_time_us = 0;
     g_pulse_phase  = 0;
     g_att_x_mdeg = g_att_y_mdeg = g_att_z_mdeg = 0;
@@ -339,4 +348,5 @@ void peripheral_stub_tick(agc_t *state)
     state->Erasable[MASS_BANK][MASS_HI_OFFSET] = MASS_FULLAPS;
     state->Erasable[MASS_BANK][MASS_LO_OFFSET] = 0;
     state->Erasable[0][DAPBOOLS_OFFSET] |= ACCSOKAY_BIT;
+    state->Erasable[2][0273] |= 04000;     // RCSFLAGS BIT13 — skip 1/ACCSET
 }
