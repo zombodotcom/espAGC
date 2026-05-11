@@ -63,7 +63,7 @@ LAYER2_TESTS := test_alarm_at_boot test_p00_select test_lamp_test \
 # included in the default `run` target since they're investigation
 # probes (long printouts, no assertions).
 DIAG_TESTS   := test_z_histogram test_hotloop_disasm test_restart_path \
-                test_keypress_response
+                test_keypress_response test_stuck_loop_state
 RENDER_TESTS := test_render_blank test_render_prog_lit
 
 TESTS := $(LAYER1_TESTS) test_keypad_hit $(LAYER2_TESTS) $(RENDER_TESTS)

@@ -203,3 +203,28 @@ Tried disabling auto-RSET + InhibitAlarms (`test_no_autorset_keypress.c`, since 
 | 033 | `057776` | `077777` | `077777` |
 
 Tested (throwaway test, since deleted) with all four channels set to LM_Simulator's values: same outcome — engine still parks in the `06647..06674` interpretive loop, 8 GOJAMs, `DSPLOCK` stays `0`. So the stuck loop is **not** unblocked by channel state alone. Whatever it's polling lives in erasable, and the LM_Simulator-equivalent must seed that too (likely the CDU counter registers at `0032..0034` or the IMU mode-monitoring state cells), or feed counter pulses through `agc_engine`'s ChannelInput path on a timer. CDU pulse injection is the most plausible next probe.
+
+### Critical reframe (2026-05-11, after `test_stuck_loop_state.c`)
+
+The "stuck loop" framing is **wrong**. A per-cycle trace at cycle 500,000 shows:
+
+- `NNADTEM = 50604` (a real noun-table entry, not zero — earlier snapshot reading was misleading)
+- `NNTYPTEM = 00110` (real type-table entry)
+- `Q = 06741` (a stable return address into some caller subroutine)
+- `FBANK` cycles between `02000` and `50000` mid-loop — actual bank switching happening
+- The "loop" actually visits **81 distinct addresses** across `02467..02472, 06042..06100, 06255..06346, 06646..06740` in a ~158-cycle period
+
+This is normal Luminary running its Pinball / DSKY-refresh / executive bookkeeping code. Real subroutine calls and returns are happening. The engine is **not** broken; it's doing real work.
+
+The visible "NW trips every 1.28 s" reduces to: **this particular routine never touches NEWJOB (erasable 067), so the hardware Night Watchman's 1.28 s deadline is missed.** That's the actual mechanism.
+
+Who normally touches NEWJOB in Luminary? Only the executive scheduler (`EXECUTIVE.agc::DUMMYJOB / ADVAN / NUCHANG2 / SPECTEST`) — code that runs **between** jobs, not within them. So if a job runs continuously without calling `CHANG1` / `CHANG2` / `JOBSLEEP` / `ENDOFJOB`, NEWJOB stays untouched and NW fires.
+
+CDU pulse injection (`test_cdu_pulse_probe.c`, since deleted): also doesn't help. The CDU counter values changed as expected but the engine kept running the same routine; NW still tripped at the same cadence.
+
+Two practical next paths:
+
+1. **Make the right interrupts fire that *do* yield through the executive.** If T3/T4/T5/T6RUPT handlers in Luminary call `CHANG1` / `CHANG2` and touch NEWJOB during their bookkeeping, then making sure those interrupts fire would unblock the NW symptom. yaAGC's engine generates these from SCALER1 internally — verify they're firing and that the handler completes through the executive.
+2. **Accept the NW trips, fix the *consequence*.** The visible problem isn't NW per se — it's that auto-RSET happens during the unstable phase and ends up allocating slot 0 to a CHARIN-priority job that competes with later keypresses (per prior SESSION_NOTES). If we delay auto-RSET until **after** Luminary settles into a working executive idle (e.g., 5-10 sec rather than 160 ms), the slot-0 contention might never happen.
+
+Both are testable in host. Option 2 is the cheapest fix candidate.
