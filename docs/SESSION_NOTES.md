@@ -190,3 +190,16 @@ Tried disabling auto-RSET + InhibitAlarms (`test_no_autorset_keypress.c`, since 
 **Root cause summary**: Luminary's interpretive GOTO loop at `06647..06674` reads from an erasable address chain that yaAGC's `agc_init.c` leaves zero-clear. On real hardware the LM_Simulator (per `third_party/virtualagc/Contributed/LM_Simulator/lm_simulator.tcl`) drives CDU counters and IMU bits that cause this routine to terminate. Without that feed, the loop runs forever and slot 0 never yields. Every keypress schedules into a free slot but the executive only switches at job yield points — so no keypress is ever dispatched.
 
 **What this means for the plan**: Phase 1 of the plan (fix the keypress dispatch bug) was misframed — there isn't a dispatch bug, the executive is doing exactly what it should. The actual blocker is **Phase 4 (LM_Simulator-equivalent peripheral feed)**, which is what the upstream Pi/Linux ports also rely on. The diagnostic harness (`mingw32-make diag`) is now in place; the next session should port the minimal subset of `lm_simulator.tcl` needed to feed CDU/IMU values that let the boot interpreter terminate.
+
+### Tried: LM_Simulator's initial channel values
+
+`third_party/virtualagc/Contributed/LM_Simulator/lm_simulator.tcl:570-572` sets the boot channel state to:
+
+| Channel | LM_Simulator | Our agc_init.c | Upstream agc_engine_init.c |
+|---|---|---|---|
+| 030 | `036331` | `036377` | `037777` |
+| 031 | `077777` | `077777` | `077777` |
+| 032 | `021777` | `077777` | `077777` |
+| 033 | `057776` | `077777` | `077777` |
+
+Tested (throwaway test, since deleted) with all four channels set to LM_Simulator's values: same outcome — engine still parks in the `06647..06674` interpretive loop, 8 GOJAMs, `DSPLOCK` stays `0`. So the stuck loop is **not** unblocked by channel state alone. Whatever it's polling lives in erasable, and the LM_Simulator-equivalent must seed that too (likely the CDU counter registers at `0032..0034` or the IMU mode-monitoring state cells), or feed counter pulses through `agc_engine`'s ChannelInput path on a timer. CDU pulse injection is the most plausible next probe.
