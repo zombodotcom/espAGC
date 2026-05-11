@@ -10,4 +10,19 @@ config AGC_AUTO_RSET_AT_BOOT
         ALARM lamp clear at idle. Disable to observe raw alarm
         behavior for debugging the underlying peripheral state.
 
+config AGC_TRACE_KEYRUPT1
+    bool "Trace KEYRUPT1 / NOVAC execution to UART"
+    default n
+    help
+        Enable per-instruction UART logging while the engine is
+        executing inside the KEYRUPT1 fixed-fixed window
+        (RegZ in 04024..04046). Captures FBANK/BBANK/A/L/Q plus
+        the two words at the address in Q (NOVAC's DCA target).
+        Diagnostic for the keypress-dispatch bug documented in
+        docs/NEXT_SESSION.md: on hardware, NOVAC schedules CHARIN
+        with a bad CADR (077615). With this flag on, the trace
+        will show whether the engine reads the correct 2CADR
+        words at the moment of DCA. Leave off in production -
+        emits ~16 log lines per keypress.
+
 endmenu
