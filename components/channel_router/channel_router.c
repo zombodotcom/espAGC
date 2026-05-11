@@ -11,6 +11,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 #include "esp_log.h"
 
 #include "yaAGC.h"
@@ -50,7 +51,15 @@ static const char *TAG = "chrouter";
 static dsky_state_t  g_snapshot;
 static SemaphoreHandle_t g_mutex;
 
+// Keypress ring. Producer side runs in HTTP/touch task context (and could
+// in theory be called from a touch ISR); consumer side runs in the AGC
+// engine task via ChannelInput. `volatile` alone is insufficient — it
+// doesn't make the (slot-write + head-increment) compound atomic, so a
+// task switch between the two can leave the consumer reading a torn
+// slot. portMUX_TYPE is the right primitive: short critical sections,
+// ISR-safe, no priority inversion.
 #define KEY_RING_SZ 32
+static portMUX_TYPE      g_key_mux = portMUX_INITIALIZER_UNLOCKED;
 static volatile uint8_t  g_key_ring[KEY_RING_SZ];
 static volatile uint16_t g_key_head;     // producer (input transports)
 static volatile uint16_t g_key_tail;     // consumer (engine task)
@@ -254,18 +263,24 @@ void channel_router_on_output(int channel, int value)
 int channel_router_pump_input(void *agc_state)
 {
     agc_t *state = (agc_t *)agc_state;
-    while (g_key_tail != g_key_head) {
-        uint8_t code = g_key_ring[g_key_tail % KEY_RING_SZ];
+    uint8_t code;
+    bool have_key = false;
+    taskENTER_CRITICAL(&g_key_mux);
+    if (g_key_tail != g_key_head) {
+        code = g_key_ring[g_key_tail % KEY_RING_SZ];
         g_key_tail++;
+        have_key = true;
+    }
+    taskEXIT_CRITICAL(&g_key_mux);
+    if (have_key) {
         // Channel 015 input: 5-bit keycode. Route through WriteIO so the
         // engine's RSET-clears-RestartLight side-effect (agc_engine.c:586)
         // fires; a direct InputChannel[015] = code skips it and the RESTART
         // lamp stays latched forever. Raise KEYRUPT1 after.
         WriteIO(state, 015, code & 037);
         state->InterruptRequests[5] = 1;
-        return 0;       // process one key per engine call
     }
-    return 0;
+    return 0;       // process one key per engine call
 }
 
 void channel_router_on_routine(void)
@@ -337,13 +352,19 @@ void channel_router_on_routine(void)
 
 void channel_router_post_key(int code)
 {
+    bool dropped = false;
+    taskENTER_CRITICAL(&g_key_mux);
     uint16_t next = g_key_head + 1;
     if ((uint16_t)(next - g_key_tail) > KEY_RING_SZ) {
-        ESP_LOGW(TAG, "key ring full, dropping %d", code);
-        return;
+        dropped = true;
+    } else {
+        g_key_ring[g_key_head % KEY_RING_SZ] = (uint8_t)(code & 0x1F);
+        g_key_head = next;
     }
-    g_key_ring[g_key_head % KEY_RING_SZ] = (uint8_t)(code & 0x1F);
-    g_key_head = next;
+    taskEXIT_CRITICAL(&g_key_mux);
+    if (dropped) {
+        ESP_LOGW(TAG, "key ring full, dropping %d", code);
+    }
 }
 
 uint64_t channel_router_snapshot(dsky_state_t *out)

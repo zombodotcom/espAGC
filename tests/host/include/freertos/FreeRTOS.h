@@ -13,3 +13,12 @@ typedef uint32_t TickType_t;
 #define pdMS_TO_TICKS(ms) ((TickType_t)(ms))
 
 static inline void vTaskDelay(TickType_t t) { (void)t; }
+
+// portMUX_TYPE no-op shims. ESP-IDF uses spinlocks here; the host harness
+// is single-threaded so the critical sections collapse to nothing. Kept
+// unconditional (no #ifdef) so a regression that strips portMUX usage from
+// the firmware side can't silently change behavior here — see plan note.
+typedef int portMUX_TYPE;
+#define portMUX_INITIALIZER_UNLOCKED 0
+static inline void taskENTER_CRITICAL(portMUX_TYPE *m) { (void)m; }
+static inline void taskEXIT_CRITICAL (portMUX_TYPE *m) { (void)m; }
