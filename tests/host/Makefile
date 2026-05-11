@@ -65,7 +65,8 @@ LAYER2_TESTS := test_alarm_at_boot test_p00_select test_lamp_test \
 DIAG_TESTS   := test_z_histogram test_hotloop_disasm test_restart_path \
                 test_keypress_response test_stuck_loop_state \
                 test_delayed_rset_keypress test_find_keyrupt1 \
-                test_slots_correct test_find_dsplock test_no_autorset_verb
+                test_slots_correct test_find_dsplock test_no_autorset_verb \
+                test_slot0_origin test_slot0_code test_long_run
 RENDER_TESTS := test_render_blank test_render_prog_lit
 
 TESTS := $(LAYER1_TESTS) test_keypad_hit $(LAYER2_TESTS) $(RENDER_TESTS)
