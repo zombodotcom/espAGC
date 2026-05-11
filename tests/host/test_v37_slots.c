@@ -16,14 +16,15 @@ static void dump(const char *tag, agc_t *s)
            s->Erasable[0][5] & 07777, s->Erasable[0][4] & 077777,
            s->Erasable[0][6] & 077777, s->OutputChannel7,
            s->InputChannel[015]);
-    int verbreg = s->Erasable[2][1] & 077777;
-    int dspcount = s->Erasable[2][0] & 077777;
-    int modreg = s->Erasable[0][6] & 077777;
-    int dsplock = s->Erasable[2][012] & 077777;
-    int mmnumber = s->Erasable[2][010] & 077777;
+    int verbreg = s->Erasable[2][1] & 077777;       // VERBREG @ 01001
+    int dspcount = s->Erasable[1][0377] & 077777;   // DSPCOUNT @ 0777
+    int modreg = s->Erasable[2][011] & 077777;      // MODREG @ 01011
+    int dsplock = s->Erasable[2][012] & 077777;     // DSPLOCK @ 01012
+    int mmnumber = s->Erasable[1][0375] & 077777;   // MMNUMBER @ 0775
+    int imodes30 = s->Erasable[2][0302] & 077777;   // IMODES30 @ 01302
     int newjob = s->Erasable[0][067] & 077777;
-    printf("  VERBREG=%05o DSPCOUNT=%05o MODREG=%05o DSPLOCK=%05o MMNUMBER=%05o NEWJOB=%05o\n",
-           verbreg, dspcount, modreg, dsplock, mmnumber, newjob);
+    printf("  VERBREG=%05o DSPCOUNT=%05o MODREG=%05o DSPLOCK=%05o MMNUMBER=%05o NEWJOB=%05o IMODES30=%05o\n",
+           verbreg, dspcount, modreg, dsplock, mmnumber, newjob, imodes30);
     printf("  AllowInt=%d InIsr=%d KEYRUPT1=%d\n",
            s->AllowInterrupt, s->InIsr, s->InterruptRequests[5]);
     for (int slot = 0; slot < 8; slot++) {
@@ -55,8 +56,15 @@ int main(void)
     harness_post_key(0);  harness_step(200000);
     dump("after 2nd 0", agc_core_state());
 
-    harness_post_key(28); harness_step(500000);
-    dump("after E", agc_core_state());
+    harness_post_key(28); harness_step(200000);
+    dump("after E +200k", agc_core_state());
+
+    for (int i = 1; i <= 8; i++) {
+        harness_step(500000);
+        char tag[40];
+        snprintf(tag, sizeof tag, "after E +%dM cycles", 200 + 500*i);
+        dump(tag, agc_core_state());
+    }
 
     PASS();
 }

@@ -81,7 +81,7 @@ DIAG_TESTS   := test_z_histogram test_hotloop_disasm test_restart_path \
                 test_slots_correct test_find_dsplock test_no_autorset_verb \
                 test_slot0_origin test_slot0_code test_long_run \
                 test_ch010_writes test_stuck_z_trace test_dump_exec_state \
-                test_slot0_dwell test_dsptab_dump test_keypress_timeline test_verb_capture test_find_verbreg test_charin_state test_z_trace_after_verb test_cadrstor_when_charin test_charin_real_trace test_slot2_post_verb test_charin_verify test_check_restart test_long_verb test_charin_arrival test_slot0_evolve test_newjob_trace test_very_long test_accsokay_wait test_redoctr test_early_verb test_early_verb_trace test_v35e_full test_v37e00e_full test_v37_slots
+                test_slot0_dwell test_dsptab_dump test_keypress_timeline test_verb_capture test_find_verbreg test_charin_state test_z_trace_after_verb test_cadrstor_when_charin test_charin_real_trace test_slot2_post_verb test_charin_verify test_check_restart test_long_verb test_charin_arrival test_slot0_evolve test_newjob_trace test_very_long test_accsokay_wait test_redoctr test_early_verb test_early_verb_trace test_v35e_full test_v37e00e_full test_v37_slots test_v37_trace test_v37_zhist test_v37_bankhist test_v37_trace2 test_v37_postcanv37 test_oktograb_caller test_oktograb_history test_v37_pooh_trace
 RENDER_TESTS := test_render_blank test_render_prog_lit
 
 TESTS := $(LAYER1_TESTS) test_keypad_hit $(LAYER2_TESTS) $(RENDER_TESTS)
