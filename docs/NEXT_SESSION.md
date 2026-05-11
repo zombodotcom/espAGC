@@ -1,13 +1,39 @@
-# Next session — slot 0 (1/ACCS) hogs CPU; CHARIN can't preempt
+# Next session — CHARIN scheduled but slot 0's job never ENDOFJOBs
 
 Last touched: 2026-05-11. Test suite green (`mingw32-make run`: ALL PASS).
 
-## Updates this iteration
+## Real root causes identified + fixed this iteration
 
-- **Channel wdata reverted to Apollo11-launch.canned values**: `ch030=037377 ch031=057777` (was `036331/077777`). The canned values cause ZERO TC-Trap alarms vs ~150 with LM_Simulator's wdata defaults. The launch recording is the truer fresh-start state.
-- **yaAGC alarm inhibit enabled in test harness**: `tests/host/agc_harness.c` sets `InhibitAlarms = 1` after `agc_core_init`. This is yaAGC's documented `--inhibit-alarms` option used on Pi/Linux for development. Still lets alarms latch in ch77 for observation but skips the GOJAM-on-alarm.
-- **peripheral_stub_tick simplified to a no-op** — earlier the periodic tick re-asserted ch030/ch033 and forced IMODES30/IMODES33 to fresh values, which contributed to alarm storms. `peripheral_stub_init` sets the initial channel state and that's enough.
-- **New diagnostics**: `test_charin_arrival`, `test_slot0_evolve`, `test_newjob_trace`, `test_very_long`. Together they prove slot 0 IS executing 1/ACCS (not stuck — LOC progresses through bank-20 offsets 02447, 02450, 02451, …, 03425, …) but never reaches `ENDOFJOB`, so CHARIN at slot 1 with PRIO=30110 never gets CPU even though NEWJOB=014 is set.
+1. **MASS = 0 at boot was the original blocker for 1/ACCS**. With LEMMASS=0, 1/ACCS's HIASCENT/LOASCENT bound checks all fall through to MASSFIX, which clamps LEMMASS to LOASCENT and `TCF F(MASS)`. F(MASS) doesn't re-check bounds — it runs STCTR loop. STCTR completes 3 iterations, COMMEQS computes EPSILON, GOODEPS1 computes COEFFR/COEFFQ, JACCUV computes 1JACCU/1JACCV, then 1/ACCONT (or 1/ACCRET). 1/ACCRET sets ACCSOKAY in DAPBOOLS via `ADS DAPBOOLS`.
+
+   **Fix**: `peripheral_stub_init` writes MASS = FULLAPS (05050) to Erasable[2][244]. Equivalent to a V21N47E PAD LOAD.
+
+2. **Software RESTART (POODOO/BAILOUT/ABORT2 → ENEMA → FRESH_START) clears DAPBOOLS to BOOLSTRT (21312)** — losing the ACCSOKAY bit. Without ACCSOKAY, DAPIDLER goes back to MOREIDLE forever.
+
+   **Fix**: `peripheral_stub_tick` re-asserts MASS and `DAPBOOLS |= ACCSOKAY` every 200ms. Verified by `test_accsokay_wait.exe` and `test_redoctr.exe`.
+
+3. **TC-Trap GOJAMs** were eliminated by Apollo11-launch.canned channel values + `InhibitAlarms=1`.
+
+4. **Full LM_Simulator attitude model** added — 3-axis stable-member angles in milli-degrees, integrated from jet impulses observed on ch005/ch006, PCDU/MCDU pulses pushed when angle exceeds one-pulse threshold (≈11 mdeg).
+
+## What still doesn't work
+
+V35E does NOT produce VRB=[3,5]. After 100M cycles:
+- DAPBOOLS=00004 (ACCSOKAY set persistently — confirmed)
+- MASS=05050 (persistent — confirmed)
+- Slot 1 has CHARIN signature (PRIO=30110 LOC=02077 BANK=60101 MPAC[0]=keycode)
+- BUT `test_charin_real_trace.exe`: Z=02077 NEVER appears with `adjFB=040` (CHARIN's bank) — only with `adjFB=06` (T4RUPT). The executive never actually picks slot 1 for CPU.
+
+The remaining gate: **slot 0 holds a job at PRIO=27110 that never reaches `TC ENDOFJOB`**. The Block II AGC executive only switches jobs at job-end (ADVAN's CCS NEWJOB) so as long as slot 0's job runs forever, slot 1's CHARIN waits forever.
+
+`test_slot0_evolve.exe` shows slot 0 PRIO transitions 77777 → 27110 once at c=3483 and STAYS at 27110 for 100M+ cycles. LOC progresses through bank-7 addresses around MKRELEAS (`07,2056 TC IBNKCALL; 07,2057 CADR GOODEND`) — that's part of AOTMARK.agc. The job is making progress but never finishing.
+
+Hypothesis: slot 0 is a background job (servicer / longcall) that's working but in an infinite-loop pattern. On real Apollo + Pi/Linux yaAGC + LM_Simulator, the same scenario presumably works because either (a) slot 0's job IS short and DOES ENDOFJOB regularly, or (b) Pi/Linux has a different mechanism we're missing.
+
+Next investigation:
+- Find what schedules slot 0's PRIO27 job at boot. Track its full lifecycle. Why does it never reach `TC ENDOFJOB`?
+- Or alternatively: have peripheral_stub force ENDOFJOB on slot 0 periodically (this would be a corner cut — not preferred).
+- Or: install yaAGC + LM_Simulator + yaDSKY2 on a Linux VM and observe the actual reference behavior.
 
 ## Root cause identified this session
 
