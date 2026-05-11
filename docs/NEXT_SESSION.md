@@ -1,8 +1,51 @@
-# Next session handoff — FBANK leak between interrupts is the root cause
+# Next session handoff — Phase 4 (peripheral feed) is the actual blocker
+
+Last touched: 2026-05-11 (later). All commits up to `88a7dc8` pushed to `origin/main`.
+
+## Corrected framing (this is the sixth and confirmed revision)
+
+The "FBANK leak across interrupts" framing in commits `4814251`/`8e00e69` was based on **reading the wrong cell** — `test_novac_dca.c` was using `InputChannel[004]` thinking that was FBANK, but `ChanSCALER1 == 04` is the SCALER1 counter (a cycle counter), not FBANK. When the test was corrected to read `Erasable[0][4]` (RegFB), both KEYRUPT1 invocations show FBANK = `10000` — identical, no leak. Disregard that section below in this doc.
+
+The actual finding (this session, via new `mingw32-make diag` tests):
+
+1. **Engine is stuck in an interpretive GOTO loop at fixed-fixed `06647..06674`** (Z-histogram concentration of 17%+ in `06070..06100`, and trace shows the TCF-back-to-self at `06674 → 06647`).
+2. **The loop body reads erasable `0117 (NNADTEM)` and `0120 (NNTYPTEM)`** — both zero — and does conditional branches that never escape because the data they need has never been initialised by Luminary's `LODNNTAB` (which is the routine that would normally populate `NNADTEM` from the NNADTAB[NOUNREG] entry).
+3. **NIGHT WATCHMAN is the only thing actually causing GOJAM** — 8 GOJAMs in 1.5 M cycles, every single one with `NightWatchmanTripped == 1`. NW trips because the interpretive loop above never references erasable 067 (NEWJOB). All other watchdogs (`RuptLock`, `NoRupt`, `NoTC`, `TCTrap`) flap briefly during the boot transient but self-clear within hundreds of cycles.
+4. **Suppressing alarms** (`InhibitAlarms = 1`) and/or **disabling auto-RSET** doesn't help. Same loop. Slot 0 just picks up a lower-priority `00110` instead of CHARIN's `030110`, but it still never finishes. `DSPLOCK` stays 0 across every variant.
+
+So: the keypress dispatch path is not broken. There's nothing to dispatch into. **Slot 0 is held by a Luminary boot-time interpreter routine that's waiting for peripheral state that we don't simulate.** Upstream yaAGC + LM_Simulator works because LM_Simulator drives CDU counters / IMU bits that cause this routine to terminate. Without that feed, the loop runs forever, slot 0 never yields, and keypress jobs scheduled into higher slots can't run.
+
+## Plan correction
+
+Plan phases 1, 2, 3 (keypress dispatch fix → dual-core → lock-free output) do not solve the visible "DSKY doesn't respond" problem. **Phase 4 (LM_Simulator port) is the actual unblocker** and should be done first.
+
+The bare minimum subset, based on what the stuck loop reads:
+
+- The loop needs `NNADTEM`/`NNTYPTEM` to be non-zero with a valid NNADTAB entry. That happens when Luminary's `LODNNTAB` runs successfully — and it does, on boot, but the *result* it produces (NNADTEM=0 for NOUNREG=0) hits the +0 CCS branch and the loop never advances. So either (a) NOUNREG needs to be set to a valid non-zero noun at boot, or (b) we need to identify what *outside* the loop is supposed to set the exit condition.
+- More likely: this is the executive's interpreter dispatching a job (probably a DSKY-related task scheduled by FRESH-START / GOPROG3 / DOFSTRT1) whose body uses INDEX off NNADTEM. The job is parameterised on erasable cells we leave zero-cleared.
+
+Either way, the fix is to **provide LM_Simulator-equivalent erasable + channel state** at boot, then look at whether the loop terminates. Concretely: port the boot-time portion of `third_party/virtualagc/Contributed/LM_Simulator/lm_simulator.tcl` into `components/peripheral_stub/peripheral_stub.c::peripheral_stub_init()`.
+
+## Diagnostic infrastructure now in tree
+
+Run `mingw32-make diag` to build the new diagnostics (separate from `run` since they print rather than assert):
+
+- `tests/host/test_z_histogram.c` — 2M-cycle PC-density histogram. Cross-references hot addresses with Luminary source.
+- `tests/host/test_hotloop_disasm.c` — dumps fixed-fixed code around the hottest address + a 50-cycle execution trace.
+- `tests/host/test_restart_path.c` — watches every GOJAM trigger, all watchdog flag transitions, NEWJOB/FAILREG changes.
+- `tests/host/test_keypress_response.c` — high-level "type V35E and look at VRB digits" contract test. Currently fails (digits stay blank — the canary for when Phase 4 actually unblocks dispatch).
+
+## Older framing (kept below for history)
+
+The rest of this document describes the prior FBANK-leak framing. It is **wrong** (based on the misreading above) — skim only if you need context on the investigation path.
+
+---
+
+# OLD: Next session handoff — FBANK leak between interrupts is the root cause
 
 Last touched: 2026-05-12. All commits up to `4814251` pushed to `origin/main`.
 
-## Real root cause (FIFTH revision, this is the right one)
+## Real root cause (FIFTH revision, this is the right one) — WRONG, see correction above
 
 Host harness now reproduces the bug via `tests/host/test_charin_dispatch.c`, `test_charin_timeline.c`, `test_charin_trace.c`, and the decisive `test_novac_dca.c`. Fast iteration loop, no flash cycle needed.
 
