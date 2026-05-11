@@ -67,23 +67,22 @@ static void init_cpu_state(agc_t *State)
     // Channels 30-33: per Luminary099/INPUT_OUTPUT_CHANNEL_BIT_DESCRIPTIONS.agc,
     // these are LM hardware-status inputs and "ALL BITS … ARE INVERTED AS
     // SENSED BY THE PROGRAM, SO A VALUE OF ZERO MEANS THE INDICATED SIGNAL
-    // IS PRESENT." Stock yaAGC initialises ch30 to 0o37777 — every signal
-    // de-asserted — which means *no IMU healthy*, *AGS in control*, *no
-    // PIPA freshness*, etc. Luminary then perpetually re-asserts a
-    // peripheral-fault PROG caution every 1.28 s of refresh.
+    // IS PRESENT." Match upstream yaAGC (agc_engine_init.c:255-258) exactly:
+    // ch030 = 037777, ch031-033 = 077777 — every signal de-asserted.
     //
-    // We instead start in a "healthy LM with IMU operating, LGC in
-    // control, temp within limits" state by *clearing* the matching
-    // signal-present bits:
-    //   ch30 bit 9  (IMU OPERATE WITH NO MALFUNCTION)        -> 0 = signal present
-    //   ch30 bit 10 (LM COMPUTER (NOT AGS) HAS CONTROL)      -> 0 = LGC in control
-    //   ch30 bit 15 (TEMP STABLE MEMBER WITHIN DESIGN LIMITS)-> 0 = temp OK
-    // Other bits stay 1 (signal NOT present = no fault / no command).
+    // Previously we cleared bits 9/10/15 of ch030 to assert "IMU operating,
+    // LGC in control, temp OK" hoping to skip IMU turn-on. Test
+    // test_upstream_init showed that with our 036377 value, the engine
+    // gets stuck in an interpretive GOTO indirection loop at fixed-fixed
+    // Z=06647-06674 around cycle 100K. With upstream's 037777 (which
+    // tells Luminary "IMU is NOT yet operating, no PIPA freshness, AGS
+    // in control"), the engine escapes the loop and progresses normally.
     //
-    //   bits 1..8   -> 0o0377
-    //   bits 11..14 -> 0o36000
-    //   total mask  -> 0o36377
-    State->InputChannel[030] = 036377;
+    // The peripheral_stub continuously updates ch030-033 from boot
+    // onward via its tick, so the channel state evolves to "IMU healthy"
+    // shortly after FRESH_START completes — emulating the IMU turn-on
+    // sequence rather than skipping it.
+    State->InputChannel[030] = 037777;
     State->InputChannel[031] = 077777;
     State->InputChannel[032] = 077777;
     State->InputChannel[033] = 077777;

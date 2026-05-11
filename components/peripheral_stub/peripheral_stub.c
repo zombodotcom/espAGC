@@ -60,22 +60,28 @@
 #define DSPTAB_GL_NOATT       (DSPTAB_NOATT | DSPTAB_GIMBAL_LOCK)
 #define DSPTAB_REQUEST        040000u
 
-// Boot-time channel values matching the recorded Apollo 11 launch
-// (third_party/virtualagc/yaDSKY2/Apollo11-launch.canned) at time 0.
-// This is the bit-for-bit channel state Luminary saw at boot in a
-// known-working Apollo 11 launch. The recording then shows ch30
-// transitioning to 37357 / 37356 / 37357 as the ISS turn-on sequence
-// progresses — those transitions are driven by Luminary's own state
-// machine in response to its boot-time outputs, not by the simulator.
+// Boot-time channel values. Per ch030 being inverted-sense (0=signal
+// present), starting with 037777 means "no signals yet" — IMU not
+// operating, AGS in control, no PIPA freshness, temp out of limits.
+// This is the upstream yaAGC default (agc_engine_init.c:255).
 //
-// LM_Simulator's set_ini_values (lm_simulator.tcl:570-572) has slightly
-// different ch30/ch31 defaults (036331/077777) but those produce more
-// ch30/IMODES30 XOR mismatches that thrash T4RUPT's IMUMON loop. The
-// recorded launch values are the truer fresh-start state.
-#define LM_SIM_CH030  037377   // Apollo11-launch.canned at time 0
-#define LM_SIM_CH031  057777   // Apollo11-launch.canned at time 0
-#define LM_SIM_CH032  021777   // lm_simulator.tcl wdata(32) default
-#define LM_SIM_CH033  057776   // lm_simulator.tcl wdata(33) default
+// We previously used 037377 (Apollo11-launch.canned time 0) which has
+// bit 9 cleared = "IMU OPERATE WITH NO MALFUNCTION asserted". Tests
+// confirmed that pre-asserting IMU at boot causes Luminary's
+// interpretive code to enter an infinite GOTO loop at fixed-fixed
+// Z=06647-06674 (V67WW INTSTALL/INTWAKE area) around cycle 100K — the
+// real boot needs to see IMU come up VIA the documented turn-on
+// sequence, not pre-asserted. The peripheral_stub_step then transitions
+// channels to "IMU healthy" once Luminary's startup has progressed.
+//
+// LM_Simulator's set_ini_values uses 036331 — same problem, even more
+// signals pre-asserted. The fresh-state upstream default is the right
+// starting point; specific bits get cleared by the simulator as the
+// boot sequence advances.
+#define LM_SIM_CH030  037777   // upstream yaAGC default — no signals yet
+#define LM_SIM_CH031  077777   // upstream yaAGC default
+#define LM_SIM_CH032  077777   // upstream yaAGC default
+#define LM_SIM_CH033  077777   // upstream yaAGC default
 
 // Step accounting: tracks total simulated time and pulse-emission cadence.
 // Reset by peripheral_stub_init.
@@ -191,32 +197,18 @@ void peripheral_stub_init(void)
     state->InputChannel[032] = LM_SIM_CH032;
     state->InputChannel[033] = LM_SIM_CH033;
 
-    // Emulate PAD LOAD for MASS. On real Apollo, the crew types V21N47E
-    // to load LM mass before any operational program runs. Without it,
-    // 1/ACCS computes LEMMASS=0 and never reaches 1/ACCRET (which sets
-    // ACCSOKAY in DAPBOOLS), and DAPIDLER stays in MOREIDLE forever
-    // since CHECKUP's `BZF MOREIDLE` keeps branching back. The CHARIN
-    // slot allocated by KEYRUPT1 then never gets CPU because slot 0's
-    // 1/ACCSET job at PRIO=27110 (lower than CHARIN's 30110) doesn't
-    // ENDOFJOB. MASS is a DP (two-word) value at erasable address 01244:
-    //   high word: high part of mass in B-16 scale (decimal kg * 65536)
-    //   low word:  low part
-    // Apollo 11 ascent stage was ~4700 kg; FULLAPS in Luminary099
-    // CONTROLLED_CONSTANTS.agc is OCT 5050 (decimal 5050) which is the
-    // nominal full ascent mass marker. Use FULLAPS so 1/ACCS's
-    // HIASCENT/LOASCENT bounds checks pass without clamping.
-    // MASS = Erasable[2][0244]; CSMMASS = Erasable[2][0245].
-    state->Erasable[2][0244] = 05050;   // MASS high word (FULLAPS)
-    state->Erasable[2][0245] = 0;       // MASS low word
-
-    // RCSFLAGS bit 13 — DAPIDLER checks this on every T5RUPT to decide
-    // whether to NOVAC 1/ACCSET. If clear, NOVAC fires at PRIO27,
-    // creating a long-running job in slot 0 that starves CHARIN. If set,
-    // DAPIDLER goes straight to CHECKUP. Pre-setting it skips the
-    // 1/ACCSET dance entirely — we already pre-loaded MASS and force
-    // ACCSOKAY, so DAPIDLER's downstream logic still works.
-    // RCSFLAGS at erasable 01273 = Erasable[2][0273]. BIT13 = 04000.
-    state->Erasable[2][0273] |= 04000;
+    // No erasable-cell pre-seeding. FRESH_START_AND_RESTART.agc:430-450
+    // explicitly initializes MASS, HIASCENT, DAP coefficients, RCSFLAGS,
+    // and DAPBOOLS itself during cold boot — our previous attempts to
+    // pre-seed these were either redundant (FRESH_START overwrote them)
+    // or actively harmful (pre-asserting RCSFLAGS bit 13 / ACCSOKAY
+    // before FRESH_START ran caused DAPIDLER's first T5RUPT to take a
+    // different branch and ended up in the V67WW interpretive GOTO loop).
+    //
+    // Pad-load values that crews entered via V21NxxE (IMU compensation,
+    // W-matrix scaling, etc.) are NOT initialized by FRESH_START — but
+    // those cells aren't read during cold boot before V35E completes,
+    // so they don't need seeding for the keypad-test scenario.
 
     g_step_time_us = 0;
     g_pulse_phase  = 0;
