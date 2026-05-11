@@ -13,7 +13,7 @@ The emulator core is yaAGC. License is **GPL v2** (carries through from yaAGC).
 | Layer 2b — renderer pixel tests | **2/2 PASS** | Blank frame FNV-1a hash, region assertions for lit PROG/VERB/NOUN cells |
 | `yaagc_ref` | **builds, runs** | Reference harness using upstream `agc_engine_init.c` directly — links `NullAPI.c` to bypass the socket layer. Run `./yaagc_ref.exe` to see vanilla yaAGC's cold-boot behavior for comparison. |
 | Layer 3 — QEMU | **deferred** | No QEMU support for ESP32-C5/WROOM in any released QEMU; covered by Layer 2 instead |
-| Layer 4 — hardware | **boots, V35E works** | Firmware brings up the ST7789 panel, loads Luminary099, joins WiFi (or falls back to a SoftAP `espAGC`), and accepts taps on the on-screen 19-key keypad. V35E lamp test renders end-to-end (VERB=35, then all digits = 88888 with status lamps lit, per Block II spec). |
+| Layer 4 — hardware | **boots, engine runs** | Firmware brings up the ST7789 panel, loads Luminary099, falls back to SoftAP `espAGC` if no WiFi creds configured. Serial monitor confirms boot succeeds end-to-end on commit `ac94ec3`: auto-RSET fires at tick 16, ch011 toggles (COMP ACTY blinking), ch010 row-by-row blanking sweep runs, executive dispatches jobs (ca=1 in snap logs). Connect to AP `espAGC` and browse `http://192.168.4.1/` to send V35E from the web UI's canned sequences. |
 
 DSKY output renders as a 320×240 framebuffer on the ST7789 panel — status panel, register window, and an on-screen 19-key keypad backed by the XPT2046 resistive touchscreen. No LVGL — direct framebuffer in 80-row strips, three passes per frame.
 
