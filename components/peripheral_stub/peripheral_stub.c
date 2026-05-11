@@ -402,6 +402,72 @@ static void rescue_stuck_job(agc_t *state)
     g_last_newjob = newjob;
 }
 
+// Look for an unhandled CHARIN slot (PRIO=30110, LOC=02077,
+// BANKSET=60101). If found, an external keypress allocated CHARIN
+// but the executive can't dispatch it (1/ACCSET blocking, or a
+// stale priority-30 job from an earlier keypress is "active"). Free
+// any blocking active slot, then set up the engine to execute
+// CHARIN's first instruction directly.
+//
+// CHARIN entry per PINBALL_GAME__BUTTONS_AND_LIGHTS.agc:475:
+//   bank 040 (FBANK=030+SBANK), offset 02077, EBANK=1
+// In yaAGC: Z=02077 with FBANK=030 and ch7 bit 6 set selects bank 040.
+#define CHARIN_LOC      02077
+#define CHARIN_BANKSET  060101  /* FBANK=030, SBANK in bit 6, EBANK=1 */
+#define CHARIN_PRIORITY 030110
+
+static void dispatch_pending_charin(agc_t *s)
+{
+    if (s->InIsr) return;       // don't disturb interrupt processing
+
+    // Look for a CHARIN slot (skip slot 0, which is the active set).
+    int charin_slot = -1;
+    for (int slot = 1; slot < 8; slot++) {
+        int base = 0154 + slot * 014;
+        int prio = s->Erasable[0][base + 11] & 077777;
+        int loc  = s->Erasable[0][base + 8]  & 077777;
+        int bset = s->Erasable[0][base + 9]  & 077777;
+        if (prio == CHARIN_PRIORITY && loc == CHARIN_LOC &&
+            bset == CHARIN_BANKSET) {
+            charin_slot = slot;
+            break;
+        }
+    }
+    if (charin_slot < 0) return;
+
+    // Check if the active slot is ALSO at PRIO=30110 (duplicate). If so,
+    // free it. This catches stale CHARIN-display jobs blocking the new
+    // CHARIN.
+    int active_prio = s->Erasable[0][0167] & 077777;
+    if (active_prio == CHARIN_PRIORITY) {
+        s->Erasable[0][0167] = 077777;   // mark active free
+    } else if (active_prio != 077777 && active_prio < CHARIN_PRIORITY) {
+        // Lower priority blocking CHARIN. Mark it free too.
+        s->Erasable[0][0167] = 077777;
+    } else {
+        return;                          // nothing to dispatch over
+    }
+
+    // Now manually do CHANG2's swap: copy slot N's state to active.
+    int src = 0154 + charin_slot * 014;
+    for (int off = 0; off < 014; off++) {
+        s->Erasable[0][0154 + off] = s->Erasable[0][src + off];
+    }
+    // Free the source slot.
+    for (int off = 0; off < 014; off++) {
+        s->Erasable[0][src + off] = 0;
+    }
+    s->Erasable[0][src + 11] = 077777;
+
+    // Set engine state to start executing CHARIN's first instruction.
+    s->Erasable[0][5] = CHARIN_LOC;           // RegZ
+    s->Erasable[0][4] = 030 << 10;            // RegFB = FBANK 030
+    s->Erasable[0][6] = CHARIN_BANKSET;       // RegBB
+    s->Erasable[0][3] = 1;                    // RegEB = 1
+    s->OutputChannel7 |= 0100;                // superbank bit
+    s->Erasable[0][067] = 077777;             // NEWJOB cleared
+}
+
 void peripheral_stub_tick(agc_t *state)
 {
     if (state == NULL) return;
@@ -410,6 +476,7 @@ void peripheral_stub_tick(agc_t *state)
     peripheral_stub_step(state, 200000);
 
     rescue_stuck_job(state);
+    dispatch_pending_charin(state);
 
     // Continuously assert RCSFLAGS bit 13. DAPIDLER's T5RUPT checks
     // this bit and only NOVACs 1/ACCSET if it's CLEAR. FRESH_START
