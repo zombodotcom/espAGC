@@ -104,30 +104,54 @@ void peripheral_stub_init(void)
     g_pulse_phase  = 0;
 }
 
+// PCDU counter addresses (Block II AGC, per agc_engine.c FIRST_CDU=032).
+// CDUX=032, CDUY=033, CDUZ=034. These are *erasable* counter registers
+// the AGC IMU monitoring code (T4RUPT_PROGRAM.agc::T4JOB) polls.
+// LM_Simulator pushes pulses to them at 400 counts/sec slow mode.
+//
+// IncType=1 = PCDU pulse (positive count, slow rate ~400 cps). yaAGC
+// routes this through PushCduFifo so the increment happens at the
+// engine's emulated hardware rate (every ~213 engine cycles per pulse).
+#define CDUX_COUNTER  032
+#define CDUY_COUNTER  033
+#define CDUZ_COUNTER  034
+#define PCDU_INC_TYPE  1
+
 // One simulation step. Call at ~100 Hz (every 10 ms of simulated time).
 // On hardware: a dedicated FreeRTOS task with vTaskDelayUntil.
 // On host: interleaved with agc_engine cycles via the harness tick hook.
 //
-// Increment A (this commit): periodic re-write of channels 30-33 so that
-// any spurious writes from Luminary don't drift them away from the
-// LM_Simulator baseline. LM_Simulator does the same — writes every time
-// its update timer fires.
-//
-// Increment B (next): push CDU counter pulses via UnprogrammedIncrement.
-// Increment C: integrate attitude state, respond to channel 5/6 jet
-// commands, drive CDU at integrated rate.
+// Increment A (prior commit): periodic re-write of channels 30-33 to
+// match LM_Simulator's continuous channel feed.
+// Increment B (this commit): push CDU counter pulses via the engine's
+// UnprogrammedIncrement entry point — same path LM_Simulator's socket
+// input uses (agc_engine.c:1570). At 100 Hz step rate and 400 cps PCDU
+// nominal, push 4 pulses per axis per step (= 400/100).
+// Increment C (next): integrate attitude state, respond to channel
+// 5/6 jet commands, drive CDU at integrated rate (not constant).
 void peripheral_stub_step(agc_t *state, uint32_t dt_us)
 {
     if (state == NULL) return;
     g_step_time_us += dt_us;
     g_pulse_phase++;
 
-    // Re-assert the LM_Simulator baselines on every step. ch031/032 carry
-    // RHC/THC/PRO state — leave those alone if the user is interacting;
-    // for now we just push the defaults, which is what LM_Simulator does
-    // when no controls are touched.
+    // Re-assert the LM_Simulator channel baselines.
     state->InputChannel[030] = LM_SIM_CH030;
     state->InputChannel[033] = LM_SIM_CH033;
+
+    // Inject CDU pulses. With dt_us=10000 (10 ms = 100 Hz step) and the
+    // LM_Simulator nominal 400 cps slow rate, that's 4 pulses per axis
+    // per step. Scale by actual dt so the rate stays roughly correct
+    // even if the caller steps faster or slower.
+    //
+    // pulses = (dt_us * 400) / 1000000 = dt_us / 2500
+    uint32_t pulses = dt_us / 2500;
+    if (pulses == 0) pulses = 1;
+    for (uint32_t i = 0; i < pulses; i++) {
+        UnprogrammedIncrement(state, CDUX_COUNTER, PCDU_INC_TYPE);
+        UnprogrammedIncrement(state, CDUY_COUNTER, PCDU_INC_TYPE);
+        UnprogrammedIncrement(state, CDUZ_COUNTER, PCDU_INC_TYPE);
+    }
 }
 
 void peripheral_stub_tick(agc_t *state)
