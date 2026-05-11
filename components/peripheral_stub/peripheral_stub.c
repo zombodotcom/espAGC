@@ -271,7 +271,10 @@ void peripheral_stub_step(agc_t *state, uint32_t dt_us)
     g_pulse_phase++;
 
     // Continuous channel feed at lm_simulator.tcl's cadence (every step).
+    // LM_Simulator writes all four of 30/31/32/33 — match.
     state->InputChannel[030] = LM_SIM_CH030;
+    state->InputChannel[031] = LM_SIM_CH031;
+    state->InputChannel[032] = LM_SIM_CH032;
     state->InputChannel[033] = LM_SIM_CH033;
 
     if (g_zero_imu) {

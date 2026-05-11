@@ -59,6 +59,19 @@ LAYER2_TESTS := test_alarm_at_boot test_p00_select test_lamp_test \
                 test_auto_rset_at_boot test_peripheral_stub_clears_imodes \
                 test_failreg_diagnostic test_lm_idle_quiet \
                 test_executive_state test_charin_dispatch
+# yaagc_ref — vanilla yaAGC reference harness. Links upstream's
+# agc_engine_init.c directly (not our agc_init.c) and NullAPI.c (no
+# socket layer). Optional --sim flag interleaves peripheral_stub_step
+# to test whether our LM_Simulator port changes vanilla behavior.
+# Build:    mingw32-make yaagc_ref.exe
+# Run:      ./yaagc_ref.exe                        # vanilla baseline
+#           ./yaagc_ref.exe --sim                  # with peripheral_stub
+yaagc_ref.exe: yaagc_ref.c $(YAAGC)/agc_engine.c $(YAAGC)/agc_engine_init.c \
+               $(YAAGC)/Backtrace.c $(YAAGC)/DecodeDigitalDownlink.c \
+               $(YAAGC)/NullAPI.c $(YAAGC)/rfopen.c \
+               $(PSTUB)/peripheral_stub.c
+	$(CC) $(CFLAGS) $(HARNESS_INC) -o $@ $^ -lm
+
 # Diagnostic-only tests — build with the same rule as LAYER2 but not
 # included in the default `run` target since they're investigation
 # probes (long printouts, no assertions).
