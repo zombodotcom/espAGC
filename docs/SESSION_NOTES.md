@@ -155,3 +155,19 @@ The real fix requires:
 3. Either supplying that state (real LM_Simulator territory) or short-circuiting the loop.
 
 This is the same root issue the upstream PI/Linux ports solve by running LM_Simulator alongside yaAGC. Until then, the host-side ERROR keeps the boot PROG ALARM lamp clear, but **no DSKY keypress actually reaches Luminary**. The web UI buttons are no-ops.
+
+### Deeper finding (2026-05-11): auto-RSET causes slot-0 hang
+
+Snapshotting cycles 130k (before auto-RSET fires at tick 16 ≈ 131k) vs 135k (just after) shows:
+
+- **At 130k:** `slot0 PRIO=033110 CADR=000000`, `LOC=000003`, `BANKSET=001173`. Luminary executing in a different code region; `RegZ=006071` (not the interpreter).
+- **At 135k:** `slot0 PRIO=030110 CADR=077615`, `LOC=000002`, `BANKSET=010006`. The auto-RSET keypress arrived, KEYRUPT1's `NOVAC` scheduled CHARIN into slot 0 with priority `CHRPRIO + FAKEPRET` (= `030110`).
+- **At 230k (95k later):** Still `slot0 PRIO=030110 CADR=077615`. **Slot 0 never frees**. `comp_acty` is blinking (engine IS executing) but the executive maintains the slot as "CHARIN running" indefinitely.
+
+Critically: `DSPLOCK=000000` throughout the entire run. CHARIN's first instruction (`PINBALL_GAME__BUTTONS_AND_LIGHTS.agc:475`) is `XCH DSPLOCK` which sets DSPLOCK to 1. So **CHARIN never even reached its first instruction** even though the executive thinks it's running it. The executive's scheduling bookkeeping is set up correctly (priority, CADR, NEWJOB-not-needed because we're "already running it") but the actual CHARIN code never executes.
+
+Most plausible interpretation: the executive's `SETLOC` allocated slot 0 to CHARIN and updated `PRIORITY[0]` + `CADR[0]`, but the actual job dispatch into `LOC = CHARIN_address` didn't happen — possibly because of a banking issue (Luminary's `2CADR CHARIN` references `EBANK= DSPCOUNT` which sets up the wrong bank context in our setup). Investigation deferred.
+
+Result: every subsequent keypress (manual RSET, V35E, V37E00E, V16N36E, anything) also schedules into a new slot but at the same priority `030110`, so `NEWJOB` doesn't update (priority equal to slot 0), and slot 0 never finishes. **The AGC is effectively input-deaf after the auto-RSET fires**.
+
+Trying `auto_rset = false` is the obvious next experiment: if disabling auto-RSET keeps slot 0 normal, then manual keypresses (from the web UI) may actually reach Luminary's CHARIN handler. Worth testing in next session.
