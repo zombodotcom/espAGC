@@ -1,87 +1,105 @@
-# Next session handoff — real LM_Simulator port, Increment C remaining
+# Next session — TC Trap GOJAMs are wiping CHARIN allocations
 
-Last touched: 2026-05-11. All commits up to `83b9be9` pushed to `origin/main`.
+Last touched: 2026-05-11. Test suite green (`mingw32-make run`: ALL PASS).
+
+## Root cause identified this session
+
+The reason V35E doesn't light segments is **NOT** that CHARIN doesn't get scheduled. It IS scheduled (slot 2 gets `PRIO=30110 LOC=02077 BANKSET=60101`, the CHARIN signature) — but the engine takes a **GOJAM (software reset)** before the slot ever runs, wiping all allocations.
+
+GOJAM source: **TC Trap alarm**. With continuous CDU pulses (`peripheral_stub_step`), yaAGC sees 150 TC-Traps per 1M cycles. Each GOJAM clears interrupt requests, channels 5-14, and resets the executive — so the CHARIN slot allocation is gone before slot 2 ever gets CPU time.
+
+How to verify on a fresh run:
+
+```sh
+cd tests/host && mingw32-make test_check_restart.exe diag
+ROM=../../build/roms/Luminary099.bin ./test_check_restart.exe 2>&1 | grep "Alarm:"
+# Currently prints ~6 TCTrap + 2 NightWatchman per 1M cycles (with periodic
+# channel-write tick only, no CDU pulses). With CDU pulses added, jumps to
+# ~150 TCTrap + 4 NightWatchman.
+```
+
+The slot-2 timeline proof:
+
+```sh
+ROM=../../build/roms/Luminary099.bin ./test_slot2_post_verb.exe
+# Output:
+#  c=    0 slot2 PRIO=77777 LOC=02447     <-- leftover from prior job
+#  c=  109 slot2 PRIO=30110 LOC=02447     <-- CHARIN being allocated
+#  c= 1195 slot2 PRIO=77777 LOC=02077     <-- wiped by GOJAM (CHARIN bank
+#                                           never actually ran — confirmed
+#                                           by test_charin_real_trace
+#                                           showing 0 hits in bank 40)
+```
+
+And `test_charin_real_trace.exe` shows **0 hits at Z=02077 with adjFB=040** (CHARIN's real address). Z=02077 hits 116 times in 200k cycles but ONLY with adjFB=06 (T4RUPT's `RXOR CHAN32`).
 
 ## What works (don't break)
 
-- yaAGC engine and Luminary099 ROM load correctly.
-- KEYRUPT1 dispatches on every keypress (`IR5` clears, `ch015` reflects keycode).
-- NOVAC allocates slots correctly: `PRIO=30110, LOC=02077, BANKSET=60101, MPAC[0]=keycode`.
-- CHARIN runs and `ENDOFJOB`s for fresh keypresses (slots 2-7 free back to `PRIO=77777`).
-- **Real periodic peripheral simulator** built today: `peripheral_stub_step(state, dt_us)` writes channels 30-33 with LM_Simulator-equivalent values and pushes CDU PCDU pulses via the engine's `UnprogrammedIncrement` entry. Same `WriteIO()` and `UnprogrammedIncrement()` paths LM_Simulator uses over its socket.
-- Host test suite green: `mingw32-make run` → ALL PASS.
-- Local yaYUL build at `third_party/virtualagc/yaYUL/yaYUL.exe` for symbol lookups (rebuild listing into `/tmp/luminary.lst`).
+- yaAGC engine and Luminary099 ROM load. Test suite green.
+- KEYRUPT1 dispatches when a key is posted (IR5 fires, ch015 updates).
+- NOVAC allocates a CHARIN slot correctly (slot 2 at PRIO=30110 LOC=02077 BANK=60101).
+- **LM_Simulator wdata values now match exactly** (`peripheral_stub.c` lines 64-78): ch030=036331, ch031=077777, ch032=021777, ch033=057776. These are the bit-for-bit values from `Contributed/LM_Simulator/lm_simulator.tcl:570-572`.
+- Diagnostic tests build under `mingw32-make diag`.
 
 ## What's blocked
 
-- DSKY digits stay blank. `dsky_state.verb[]` reads `[-1,-1]` even after V35E.
-- The specific failure mode (confirmed via `test_ch010_writes.c`): Luminary continuously writes all ch010 rows 1-12, but the digit-row payloads stay at 0 (blank). After V35E only the lamp row (row 12) updates with `payload=050` (NO ATT + GIMBAL LOCK bits set). So Luminary's DSKY-update path runs to *some* depth — it acknowledges keypresses by toggling lamp bits — but the digit-rendering portion never executes.
+- **Slot 0 stuck at PRIO=30110** (1/ACCS / GOODEPS1 in `AOSTASK_AND_AOSJOB.agc:216`) without CDU input. Won't terminate. Without 1/ACCS finishing, CHARIN at the same priority loses the slot-index tie-break forever.
+- **CDU pulses cause TC-Trap GOJAMs** that wipe everything. Continuous pulses trigger them most often, but even a small burst doesn't fully resolve 1/ACCS.
+- **DSKY digit rows stay payload=0**. Luminary writes the digit rows but DSPTAB+0..+10D never get loaded with real data because CHARIN never dispatches the verb-entry handlers.
 
-## Where the engine actually parks
+## Increment C plan (revised)
 
-After today's increments (channel feed + CDU pulses), slot 0 transitioned from PRIO=30110 (running 1/ACCS GOODEPS1) to **PRIO=33002**. PRIO33 = `OCT 33000` = `DISPLAY_INTERFACE_ROUTINES.agc:753 — MAKEPLAY raises priority via PRIOCHNG to PRIO33` for fast jobs after wake. The "002" suffix is from `AD` operations inside MAKEPLAY adding the slot offset to the user's priority.
+The plan to "add IMU/DAP feedback so slot 0 frees" is correct *in principle* but needs to be done WITHOUT tripping TC Trap. Pi/Linux yaAGC running with LM_Simulator does not seem to suffer continuous GOJAMs, so something about our timing / channel state / CDU rate differs.
 
-Slot 0 sitting at PRIO=33002 forever means MAKEPLAY isn't reaching its corresponding `PRIOCHNG`-down (or `ENDOFJOB`). Something in the display-interface state machine is waiting on input we still don't provide.
+Concrete next steps:
 
-The CHARIN jobs from keypresses (slots 4-7) all schedule correctly at `PRIO=30110` and wait — they lose to slot 0's `PRIO=33002`.
+1. **Verify Pi/Linux alarm rate**. Build yaAGC on Linux (or use a reference run), connect LM_Simulator and yaDSKY2 in their normal way, watch for "Alarm: TCTrap" / "Alarm: NightWatchman" prints. If Pi/Linux also generates these but ignores them, our problem is just slot-allocation timing (different fix). If Pi/Linux does NOT generate them, our peripheral simulation is doing something Pi/Linux does not.
 
-## What still needs to happen — Increment C
+2. **Diff our boot trace vs canonical**. The Apollo11-launch.canned file in `third_party/virtualagc/yaDSKY2/` is a recorded LM_Simulator/yaDSKY2 session. Replay it through our channel_router and compare the first 1M cycles of channel writes between our peripheral_stub and the canned trace.
 
-Per the approved plan (`C:\Users\zombo\.claude\plans\continue-but-make-a-cozy-lightning.md`), Increment C of the LM_Simulator port:
+3. **Find what makes 1/ACCS terminate without continuous pulses**. The hot Z address is `GOODEPS1` in bank 020 (= bank 16 source). The computation involves `1JACCQ`, `EPSILON`, `MP 0.35356`, `AD .7071`. Either MASS is wrong (causing DV by zero?) or APSFLBIT / FLGWRD10 state is wrong. Test `MASS` and `FLGWRD10` values during the stuck loop with a Z-conditional sampler.
 
-1. **Trace Luminary's output writes** to channels 5, 6, 11, 13, 14 around the moment slot 0 enters MAKEPLAY. These are the AGC's commands to RCS jets, lamps, alarm-clear, etc. The simulator should *respond* — toggle related input bits, update IMU state, etc. — to convince MAKEPLAY (or whichever caller it's attached to) that its preconditions are satisfied.
+4. **Get the DSKY working**. Once CHARIN can actually run, V35E should drive VBTSTLTS which loads DSPTAB+0..+10D with `OCT 05675` (the "ALL 8s" pattern) and lights the lamp row with `OCT 40674`.
 
-2. **Identify what MAKEPLAY is gated on.** Read `DISPLAY_INTERFACE_ROUTINES.agc:743-800` carefully. It branches on `PLAYTEM4`, `FLAGWRD4`, `NBUSMASK`. Those cells need either a sensible boot value or to be set by the simulator in response to specific AGC actions. The cells' meanings are documented in `FLAGWORD_ASSIGNMENTS.agc` — start there.
+## Diagnostic tests added this session
 
-3. **Implement a minimal physical model**: attitude state (3 floats), respond to channel 5/6 writes by adjusting attitude rate, drive CDU at integrated rate instead of constant pulse rate. ~200 lines.
-
-4. **The gate test**: `tests/host/test_no_autorset_verb.exe` should print `VRB=[3,5]` after V35E. Currently `VRB=[-1,-1]`.
-
-## How to start next session
-
-1. Run `cd tests/host && mingw32-make diag && ROM=../../build/roms/Luminary099.bin ./test_ch010_writes.exe` — see baseline. Row 12 payload should be `60050` after V35E (lamps set) and rows 1-11 should still be `payload=0` (no digits).
-2. Add output-channel tracing to `tests/host/test_ch010_writes.c` to log channels 5, 6, 11, 13, 14 during the V35E sequence. Identify what bits Luminary's setting.
-3. Look up MAKEPLAY in `DISPLAY_INTERFACE_ROUTINES.agc` and trace what PLAYTEM4 / FLAGWRD4 / NBUSMASK gating checks need.
-4. Extend `peripheral_stub_step` to respond appropriately — likely setting flagword bits or toggling specific channel 30/31/32/33 bits in response to AGC output channels.
-
-## What NOT to do
-
-- **No direct erasable pokes** to bypass Luminary state. Already tried (MASS, DAPBOOLS seed) — doesn't survive FRESH-START. The simulator must drive state via the engine's input channels and counter pulses, same path LM_Simulator uses on Pi/Linux.
-- **No "just disable the alarm" shortcuts.** Each band-aid hides the next issue. The fix is real peripheral simulation.
-- **Don't read erasable cells at offsets you haven't verified.** Today wasted hours on wrong-cell reads. Use `grep -nE 'SYMBOL[[:space:]]+(EQUALS|ERASE|=)' .../ERASABLE_ASSIGNMENTS.agc` to find the canonical definition, then look up the actual address in `/tmp/luminary.lst` (rebuilt via `cd third_party/virtualagc/yaYUL && ./yaYUL.exe ../Luminary099/MAIN.agc > /tmp/luminary.lst`).
-- **Don't guess at addresses by counting `ERASE` directives.** Use yaYUL's listing — addresses appear in the format `bank,offset` (e.g. `20,2604`) which translates directly to `Fixed[bank][offset]` or `Erasable[bank][offset]`.
-
-## Diagnostic infrastructure available
-
-All built today, under `mingw32-make diag` (not in `run` so they print rather than assert):
+All under `mingw32-make diag`:
 
 | Test | Purpose |
 |---|---|
-| `test_z_histogram` | PC density across 2M cycles; finds hot loops. |
-| `test_hotloop_disasm` | Dumps fixed-memory code around the hottest Z. |
-| `test_restart_path` | Tracks GOJAM triggers + watchdog flag transitions. |
-| `test_slots_correct` | Dumps all 8 executive slots with **correct** offsets (MPAC[0]=`0154+N*014`, LOC=`MPAC+8`, PRIORITY=`MPAC+11`). Use this as the authoritative pattern. |
-| `test_slot0_origin` | Slot 0 state across boot timeline. |
-| `test_no_autorset_verb` | Posts V35E and dumps all slots; the **decisive failure gate**. |
-| `test_ch010_writes` | Dumps Luminary's ch010 row writes; proves Luminary IS responding to keypresses by setting lamp bits, just not digit rows. |
-| `test_long_run` | Runs 20M cycles, confirms slot 0 doesn't free. |
+| `test_slot0_dwell` | Samples slot 0 / slot 4 PRIORITY every cycle. Reports distribution. |
+| `test_dump_exec_state` | Full bank-0 cells 0150-0260 dump + per-slot decode at boot / +V / +3 / +5 / +E. |
+| `test_dsptab_dump` | Reads DSPTAB cells (Erasable[2][023..036]) + OutputChannel10 per row. |
+| `test_keypress_timeline` | 50k-cycle Z + IR5 + ch015 + slot 4 trace post-VERB. |
+| `test_verb_capture` | VERBREG/NOUNREG/DSPCOUNT/DSPLOCK/CADRSTOR/MPAC0 after each key. |
+| `test_find_verbreg` | Snapshot diff to find cells that change after each keypress. |
+| `test_charin_state` | Same as verb_capture, focused on CHARIN-relevant cells. |
+| `test_z_trace_after_verb` | Counts Z visits to CHARIN/VERB/CHARIN2 addresses. **Note: addresses overlap by bank**. |
+| `test_charin_real_trace` | Bank-aware: counts Z=02077 hits only when `physBank=040`. |
+| `test_charin_verify` | Prints (Z, FB, ch7, sb, physBank) for every Z=02077. |
+| `test_slot2_post_verb` | Slot 2 PRIORITY transitions post-VERB — proves slot is allocated then wiped. |
+| `test_check_restart` | Counts GOJAM hits, NightWatchman trips, ISR entries. **Critical**. |
+| `test_cadrstor_when_charin` | What's CADRSTOR each time Z=02102 hits. |
+| `test_stuck_z_trace` | Z histogram in a 3000-cycle window after 1M boot. |
 
 ## File map
 
 | Path | Purpose |
 |---|---|
-| `components/peripheral_stub/peripheral_stub.c` | Real simulator: `_init` writes initial channels, `_step` runs at 100 Hz, `_tick` is the legacy hook (drives `_step` at 200 ms cadence from channel_router_on_routine). |
-| `components/peripheral_stub/include/peripheral_stub.h` | API: `peripheral_stub_init`, `_step(state, dt_us)`, `_tick(state)`. |
-| `main/app_main.c` | Calls `peripheral_stub_init()` after `agc_core_init`. (TODO: spawn dedicated 100 Hz FreeRTOS task calling `_step` directly.) |
-| `tests/host/agc_harness.c` | `harness_boot()` calls `peripheral_stub_init()`. |
-| `third_party/virtualagc/Contributed/LM_Simulator/lm_simulator.tcl` | Reference. Specifically `:570-577, 591-600, 879-893` for the channel writes. |
-| `third_party/virtualagc/Luminary099/DISPLAY_INTERFACE_ROUTINES.agc:743-800` | MAKEPLAY routine — the thing slot 0 is stuck in. |
-| `third_party/virtualagc/Luminary099/AOSTASK_AND_AOSJOB.agc` | 1/ACCS, where slot 0 used to be stuck before CDU pulses moved it forward. |
-| `third_party/virtualagc/Luminary099/FLAGWORD_ASSIGNMENTS.agc` | Bit definitions for DAPBOOLS, FLAGWRD0-15. |
-| `/tmp/luminary.lst` | yaYUL listing — symbol → bank,offset lookup. |
+| `components/peripheral_stub/peripheral_stub.c` | Channel feed (now using exact lm_simulator.tcl wdata values). One-shot CDU burst at init. Periodic tick currently only re-asserts ch030/ch033 baselines + FAILREG cleanup. |
+| `components/agc_core/io_callbacks.c` | Engine I/O glue. `ChannelInput` calls `channel_router_pump_input`. |
+| `components/channel_router/channel_router.c` | DSKY decoder + key ring. |
+| `tests/host/agc_harness.c` | `harness_boot()` runs `channel_router_init` then `agc_core_init` then `peripheral_stub_init`. |
+| `third_party/virtualagc/Contributed/LM_Simulator/lm_simulator.tcl:570-572` | Canonical Pi/Linux wdata values. |
+| `third_party/virtualagc/Luminary099/AOSTASK_AND_AOSJOB.agc:107-220` | 1/ACCS routine. GOODEPS1 is at line 216. |
+| `third_party/virtualagc/Luminary099/KEYRUPT,_UPRUPT.agc:39-59` | KEYRUPT1 → NOVAC CHARIN. |
+| `third_party/virtualagc/Luminary099/PINBALL_GAME__BUTTONS_AND_LIGHTS.agc:475` | CHARIN entry. Dispatches to VERB/NUM/ENTER/etc. by keycode. |
+| `third_party/virtualagc/Luminary099/PINBALL_GAME__BUTTONS_AND_LIGHTS.agc:3637` | VBTSTLTS (V35 handler — what we're trying to reach). |
+| `/tmp/luminary.lst` | yaYUL listing. Rebuild via `cd third_party/virtualagc/yaYUL && ./yaYUL.exe ../Luminary099/MAIN.agc > /tmp/luminary.lst`. |
 
-## Expected outcome
+## What NOT to do (lessons from this session)
 
-If Increment C lands a working simulator for channels 5/6 jet response + a minimal attitude model: slot 0 frees, DSPOUT runs, `test_no_autorset_verb` prints `VRB=[3,5]`, hardware DSKY shows VRB=35 after the curl V35E sequence.
-
-The path beyond V0 (multiple programs running V37E63E etc.) requires more substantial dynamics simulation but is straightforward once the architecture works for V0.
+- **Don't assume Z values without bank context**. Z=02077 in bank 6 (T4RUPT) is *not* CHARIN. yaAGC's Z register is 12 bits; the physical address is `(FB + superbank << 10) | Z`. Bank 40 (CHARIN's bank) requires the superbank bit (`OutputChannel7 & 0100`) set.
+- **Don't continuously inject CDU pulses**. Pi/Linux uses them but our build trips TC Trap with the same rate. Until we understand why our build differs, keep CDU rate low or one-shot.
+- **Don't force IMODES30/IMODES33 to fresh values every tick**. Earlier `peripheral_stub_tick` did this and contributed to GOJAMs. Removed in this session.
+- **Don't seed erasable cells to "unblock" Luminary**. Already tried (MASS, DAPBOOLS); Luminary's FRESH-START resets them. The simulator must drive state through the same WriteIO / UnprogrammedIncrement entry points LM_Simulator uses over its socket.

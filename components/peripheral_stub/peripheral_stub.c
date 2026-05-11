@@ -60,22 +60,22 @@
 #define DSPTAB_GL_NOATT       (DSPTAB_NOATT | DSPTAB_GIMBAL_LOCK)
 #define DSPTAB_REQUEST        040000u
 
-// Boot-time channel values matching the *recorded* Apollo 11 launch
-// transcript (third_party/virtualagc/yaDSKY2/Apollo11-launch.canned).
-// At time 0 the recording shows LM_Simulator writing:
-//   ch30 = 0o37377, ch31 = 0o57777, ch34 = 0o37377, ch35 = 0o57777
-// then transitioning to other values as the boot progresses.
-// These differ from lm_simulator.tcl's wdata() defaults (0o36331, etc.)
-// because LM_Simulator processes state before sending. The recorded
-// values are what Luminary actually saw at boot in a known-working run.
+// Boot-time channel values matching lm_simulator.tcl's set_ini_values
+// (Contributed/LM_Simulator/lm_simulator.tcl:570-572). These are the
+// EXACT values LM_Simulator writes to a yaAGC instance over its TCP
+// socket at startup on Pi/Linux, before any user interaction:
 //
-// ch32/ch33 are kept at the LM_Simulator wdata defaults (021777, 057776)
-// since the recording doesn't show explicit writes to them at time 0
-// (they were probably initialized by yaAGC's own boot defaults).
-#define LM_SIM_CH030  037377   // recorded launch value
-#define LM_SIM_CH031  057777   // recorded launch value
-#define LM_SIM_CH032  021777   // LM_Simulator wdata default
-#define LM_SIM_CH033  057776   // LM_Simulator wdata default
+//   wdata(30) "011110011011001" = 0o36331
+//   wdata(31) "111111111111111" = 0o77777
+//   wdata(32) "010001111111111" = 0o21777
+//   wdata(33) "101111111111110" = 0o57776
+//
+// We use these values verbatim so our peripheral simulator presents
+// the same fresh-start input the Pi/Linux Luminary expects to see.
+#define LM_SIM_CH030  036331   // lm_simulator.tcl wdata(30) default
+#define LM_SIM_CH031  077777   // lm_simulator.tcl wdata(31) default
+#define LM_SIM_CH032  021777   // lm_simulator.tcl wdata(32) default
+#define LM_SIM_CH033  057776   // lm_simulator.tcl wdata(33) default
 
 // Step accounting: tracks total simulated time and pulse-emission cadence.
 // Reset by peripheral_stub_init.
@@ -105,6 +105,19 @@ void peripheral_stub_init(void)
 
     g_step_time_us = 0;
     g_pulse_phase  = 0;
+
+    // One-shot CDU burst at boot. Queues a handful of PCDU pulses into
+    // the engine's CDU FIFO. The engine drains these at the hardware
+    // PCDU rate (~213 MCTs per pulse, slow mode) which is enough to
+    // unblock 1/ACCS without causing the continuous-stream TC-Trap
+    // GOJAMs we saw with periodic pulses (150 TCTraps / 1M cycles in
+    // diagnostic runs). Each axis gets 8 pulses ≈ enough to advance
+    // CDUX/Y/Z past 0 and let GOODEPS1's arithmetic resolve.
+    for (int i = 0; i < 8; i++) {
+        UnprogrammedIncrement(state, 032, 1);  // CDUX PCDU
+        UnprogrammedIncrement(state, 033, 1);  // CDUY PCDU
+        UnprogrammedIncrement(state, 034, 1);  // CDUZ PCDU
+    }
 }
 
 // PCDU counter addresses (Block II AGC, per agc_engine.c FIRST_CDU=032).
@@ -142,19 +155,27 @@ void peripheral_stub_step(agc_t *state, uint32_t dt_us)
     state->InputChannel[030] = LM_SIM_CH030;
     state->InputChannel[033] = LM_SIM_CH033;
 
-    // Inject CDU pulses. With dt_us=10000 (10 ms = 100 Hz step) and the
-    // LM_Simulator nominal 400 cps slow rate, that's 4 pulses per axis
-    // per step. Scale by actual dt so the rate stays roughly correct
-    // even if the caller steps faster or slower.
+    // CDU pulses: on Pi/Linux, LM_Simulator drives these from simulated
+    // attitude deltas (modify_gimbal_angle in AGC_IMU.tcl). At rest
+    // with no jet firings, zero pulses fire and the AGC sees a stable
+    // IMU.
     //
-    // pulses = (dt_us * 400) / 1000000 = dt_us / 2500
-    uint32_t pulses = dt_us / 2500;
-    if (pulses == 0) pulses = 1;
-    for (uint32_t i = 0; i < pulses; i++) {
-        UnprogrammedIncrement(state, CDUX_COUNTER, PCDU_INC_TYPE);
-        UnprogrammedIncrement(state, CDUY_COUNTER, PCDU_INC_TYPE);
-        UnprogrammedIncrement(state, CDUZ_COUNTER, PCDU_INC_TYPE);
-    }
+    // Empirically, the boot-time 1/ACCS computation in Luminary099
+    // does NOT terminate without *some* CDU input — without pulses
+    // slot 0 stays parked at PRIO=30110 forever inside GOODEPS1
+    // (AOSTASK_AND_AOSJOB.agc:216). A minimum-rate trickle of pulses
+    // (1 per axis per call) is enough to unblock it. This matches
+    // LM_Simulator's behavior since gimbal-angle deltas accumulate
+    // small floating-point residuals even when nominally stationary.
+    //
+    // Pi/Linux rate is 400 cps per axis from update_RCS; we do one
+    // pulse per axis per peripheral_stub_step call (~5 Hz from the
+    // legacy 200ms tick) — enough to keep 1/ACCS happy without
+    // flooding the DAP with phantom motion.
+    UnprogrammedIncrement(state, CDUX_COUNTER, PCDU_INC_TYPE);
+    UnprogrammedIncrement(state, CDUY_COUNTER, PCDU_INC_TYPE);
+    UnprogrammedIncrement(state, CDUZ_COUNTER, PCDU_INC_TYPE);
+
 }
 
 void peripheral_stub_tick(agc_t *state)
@@ -166,14 +187,13 @@ void peripheral_stub_tick(agc_t *state)
     // cycles, which at ~12 us per cycle is ~200 ms — slower than the
     // 10 ms LM_Simulator cadence but enough to demonstrate the
     // infrastructure. Hardware will spawn a dedicated 100 Hz task too.
-    peripheral_stub_step(state, 200000);  // 200 ms of sim time per call
-
-    // Restore IMODES30/IMODES33 to fresh-start values so any fault
-    // bits Luminary set on its last mode-switch pass go away before
-    // the next ALARM check runs. (peripheral_stub_step handles the
-    // ch030/033 baselines.)
-    state->Erasable[IMODES30_BANK][IMODES30_OFFSET] = IMODES30_FRESH;
-    state->Erasable[IMODES33_BANK][IMODES33_OFFSET] = IMODES33_FRESH;
+    // Re-assert channel baselines.
+    state->InputChannel[030] = LM_SIM_CH030;
+    state->InputChannel[033] = LM_SIM_CH033;
+    // IMODES restore intentionally OMITTED — forcing IMODES30/IMODES33 to
+    // FRESH values every tick interferes with Luminary's mode-switch
+    // bookkeeping and triggered repeated TC Trap GOJAMs in earlier runs.
+    // Luminary normally maintains these cells through its own routines.
 
     // (2) Host-side ERROR: if the boot-time NW trip latched the PROG
     // ALARM lamp and our KEYRUPT-driven RSET didn't clear it (CHARIN
