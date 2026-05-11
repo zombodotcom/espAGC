@@ -81,8 +81,11 @@ test_keypad_hit.exe: test_keypad_hit.c $(DISP_HAL)/dsky_keypad_320x240.c
 # --- Layer 2a: real channel_router + harness ------------------------------
 # test_replay only needs channel_router (no engine); but compiling it the
 # same way as the rest is simpler and the binaries are still small.
+# Host Layer-2 tests build with auto-RSET ON. On firmware the same flag
+# lives in sdkconfig (set by Kconfig). channel_router.c uses `#ifdef`,
+# so the symbol must be defined here to match Kconfig=y behavior.
 $(addsuffix .exe, $(LAYER2_TESTS)): %.exe: %.c $(HARNESS_SRCS)
-	$(CC) $(CFLAGS) $(HARNESS_INC) -o $@ $^ -lm
+	$(CC) $(CFLAGS) -DCONFIG_AGC_AUTO_RSET_AT_BOOT=1 $(HARNESS_INC) -o $@ $^ -lm
 
 # --- Layer 2b: renderer pixel tests ---------------------------------------
 RENDER_SRCS := \

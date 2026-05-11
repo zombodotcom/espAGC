@@ -18,9 +18,10 @@
 #include "dsky_keys.h"
 #include "peripheral_stub.h"
 
-#ifndef CONFIG_AGC_AUTO_RSET_AT_BOOT
-#define CONFIG_AGC_AUTO_RSET_AT_BOOT 1
-#endif
+/* CONFIG_AGC_AUTO_RSET_AT_BOOT is defined by Kconfig only when enabled;
+ * `=n` leaves the macro UNDEFINED, not zero. Do not provide a fallback —
+ * `#ifndef ... #define ...1` here would silently re-enable auto-RSET
+ * after the user disabled it via menuconfig. Use `#ifdef` at the gate. */
 
 extern agc_t *agc_core_state(void);
 
@@ -282,7 +283,7 @@ void channel_router_on_routine(void)
     // peripheral checks, post one synthetic RSET keypress so the
     // engine's hardware-direct RestartLight clear (agc_engine.c:586)
     // fires. See docs/superpowers/specs/2026-05-10-prog-alarm-watchdog-design.md.
-#if CONFIG_AGC_AUTO_RSET_AT_BOOT
+#ifdef CONFIG_AGC_AUTO_RSET_AT_BOOT
     static bool s_did_boot_rset = false;
     if (!s_did_boot_rset && g_routine_count >= 16) {
         channel_router_post_key(DSKY_KEY_RSET);
@@ -321,11 +322,15 @@ void channel_router_on_routine(void)
     // layout depends on `__embedded__` and packing; printing the low 32
     // bits avoids junk on platforms where the cast is unstable.
     uint32_t cyc_lo = (uint32_t)(st->CycleCounter & 0xFFFFFFFFu);
-    ESP_LOGI(TAG, "alarms RuptLock=%d NW=%d TC=%d NoTC=%d PF=%d WF=%d GW=%d  "
-                  "RegZ=%05o cyc_lo=%u",
+    ESP_LOGI(TAG, "alarms RuptLock=%d NW=%d TC=%d NoTC=%d PF=%d WF=%d GW=%d "
+                  "Restart=%d FAILREG=[%05o,%05o,%05o] RegZ=%05o cyc=%u",
              (int)st->RuptLock, (int)st->NightWatchmanTripped,
              (int)st->TCTrap, (int)st->NoTC, (int)st->ParityFail,
              (int)st->WarningFilter, (int)st->GeneratedWarning,
+             (int)st->RestartLight,
+             (unsigned)st->Erasable[0][0375],
+             (unsigned)st->Erasable[0][0376],
+             (unsigned)st->Erasable[0][0377],
              (unsigned)st->Erasable[0][RegZ],
              (unsigned)cyc_lo);
 }
