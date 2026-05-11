@@ -1,14 +1,29 @@
-# Next session handoff — KEYRUPT1 is never dispatched on hardware
+# Next session handoff — trace KEYRUPT1 handler body, look for bad CHARIN dispatch
 
-Last touched: 2026-05-11. All commits up to `fc0f406` pushed to `origin/main`.
+Last touched: 2026-05-11 (late). All commits up to `630f56a` pushed to `origin/main`.
 
-## What is the actual problem (UPDATED 2026-05-11 PM)
+## What is the actual problem (UPDATED AGAIN 2026-05-11 late)
 
-**The previous framing was wrong.** Earlier sessions said *"KEYRUPT1 fires and dispatches to 04024 but CHARIN doesn't execute its first instruction."* The new hardware tracer (`CONFIG_AGC_TRACE_KEYRUPT1=y`, hook in `components/agc_core/io_callbacks.c::ChannelInput`) proves this is not what's happening.
+**Two false starts behind us.** The trail of theories so far:
 
-**Actual finding from the trace:** during boot (1.3s–5.7s observed), the engine spends its time servicing **DOWNRUPT** (vector lead-in at `04040`, per `Luminary099/INTERRUPT_LEAD_INS.agc:75-78`) at a rate of roughly one full DOWNRUPT cycle every ~90ms. `InIsr=1` during each burst, `FBANK` varies across firings showing the interrupted code's bank context. The KEYRUPT1 lead-in (`04024..04027`, same file:60-63) **never appears in the trace** — not at boot, not after auto-RSET posts the keypress, not at any point.
+1. **First framing** (early sessions): *"KEYRUPT1 fires, NOVAC schedules CHARIN with bad CADR `077615`, CHARIN never runs."* Based on `test_executive_state.c` observations.
+2. **Second framing** (earlier 2026-05-11): *"KEYRUPT1 never fires on hardware."* Based on dispatcher trace showing no `Z=04024` events. **This was a Monitor rate-suppression artifact** — single-cycle KEYRUPT1 events were getting dropped while DOWNRUPT's 4-cycle bursts came through.
+3. **Current framing** (this session, late 2026-05-11): The full producer→consumer→dispatcher chain works correctly:
+   ```
+   chrouter: post: code=22 queued, head=1 tail=0
+   chrouter: auto-RSET posted at boot (tick 16)
+   chrouter: pump: pulled code=22 ir5=1 ch015=00022
+   disp:    Z=04024 isr=1 AI=1 reqs[1..10]=0000000000
+   keyrupt: Z=04024 ...  DXCH ARUPT
+   keyrupt: Z=04025 ...  CAF KEYRPTBB
+   keyrupt: Z=04026 ...  XCH BBANK
+   keyrupt: Z=04027 ...  TCF KEYRUPT1 (-> handler in switched bank)
+   ```
+   KEYRUPT1 dispatches reproducibly. The 4-instruction lead-in executes cleanly. After `TCF KEYRUPT1` the PC jumps to the actual handler in switched-bank fixed memory (FBANK was `11000` octal at the moment of dispatch — that's bank 0o22 = bank 18 decimal in the upper-bank space, by the encoding `FBANK = (bank << 10)` so bank 0o22 → `0o22 << 10 = 0o22000` octal, but the trace shows `FB=11000` which decodes as bank `0o11` = 9, after super-bank... TBD).
 
-So the bug isn't *"KEYRUPT1 dispatches to a bad CHARIN"*. The bug is **KEYRUPT1 doesn't dispatch at all on hardware.** That makes the prior `077615 bad CADR` observation in `test_executive_state.c` even more suspicious — it can't have come from KEYRUPT1→NOVAC→CHARIN if KEYRUPT1 never ran. Likely it was the residue of some other NOVAC caller, or a sampling artifact across host-vs-firmware timing.
+   **The trace stops there.** Our current `KEYRUPT_LO/HI = 04024..04046` window doesn't cover the handler body. So we see the engine fall through `TCF KEYRUPT1` and... go somewhere we don't observe.
+
+So the first framing (bug downstream of KEYRUPT1 lead-in) appears to be the right one after all. The `077615 bad CADR` may or may not be the actual symptom — needs re-verification once we can see the KEYRUPT1 body executing.
 
 ## What works (don't break)
 
@@ -28,29 +43,57 @@ From `CONFIG_AGC_TRACE_KEYRUPT1=y` build, UART captured at 115200 baud on COM7:
 - Zero entries with `Z` in `04024..04027` (the KEYRUPT1 lead-in window).
 - Auto-RSET fires at tick 16 (~2.5s); `channel_router: auto-RSET posted at boot` line confirms `channel_router_post_key(DSKY_KEY_RSET)` ran. But no KEYRUPT1 trace entry follows it.
 
-## Hypotheses for why KEYRUPT1 never dispatches
+## Hypotheses for why CHARIN doesn't run after KEYRUPT1 dispatches
 
-The tracer doesn't yet log enough state to pick between these; that's the next step.
+(Replacing the now-invalidated "never dispatches" section.)
 
-1. **`InterruptRequests[5]` set too late.** `channel_router_pump_input` (in `components/channel_router/channel_router.c`) sets `state->InterruptRequests[5] = 1` after `WriteIO(state, 015, code)`. It's called from `ChannelInput()` which yaAGC invokes *after* the engine's interrupt-dispatch decision for that cycle. So the request takes effect on the next `agc_engine()` call. By then, the engine has already started DOWNRUPT's body (`InIsr=1`), and KEYRUPT1 can't preempt. Result: KEYRUPT1's request sits there for the entire DOWNRUPT body (~50ms-worth of engine cycles). When DOWNRUPT's `RESUME` fires and clears `InIsr`, the engine *should* immediately dispatch KEYRUPT1 on the next cycle — but apparently doesn't.
+Once `TCF KEYRUPT1` fires (last instruction of the lead-in at `04027`), the PC jumps to the handler body that lives in switched-bank fixed memory. We do NOT trace that range yet. The handler is:
 
-2. **`RESUME` is clearing all `InterruptRequests[]`.** If yaAGC's RESUME implementation zeroes the whole array (or specifically index 5) after each ISR, our auto-RSET request gets nuked before it can fire. Need to read `agc_engine.c` RESUME handling and check.
+```
+KEYRUPT1   TS BANKRUPT       ; save BBANK
+           XCH Q              ; save Q -> QRUPT
+           TS QRUPT
+           TC LODSAMPT        ; snapshot time
+           CAF LOW5
+           EXTEND
+           RAND MNKEYIN       ; pull 5-bit keycode from ch015
+KEYCOM     TS RUPTREG4
+           CS FLAGWRD5
+           MASK DSKYFBIT
+           ADS FLAGWRD5
+ACCEPTUP   CAF CHRPRIO        ; A = priority constant
+           TC NOVAC           ; schedule CHARIN as a NEW JOB
+           EBANK= DSPCOUNT
+           2CADR CHARIN
+           CA RUPTREG4
+           INDEX LOCCTR
+           TS MPAC
+           TC RESUME
+```
 
-3. **`AllowInterrupt` is stuck at 0.** Luminary's executive often does `INHINT` / `RELINT` pairs. If something prevents the relint, interrupts stay locked forever. Tracer doesn't log `AllowInterrupt` yet.
+(`Luminary099/KEYRUPT,_UPRUPT.agc:39-59`.) Live hypotheses:
 
-4. **DOWNRUPT body is re-requesting itself before exiting.** If DODOWNTM in `T4RUPT_PROGRAM.agc` (or equivalent) re-arms `InterruptRequests[8]` as a side effect, the engine never gets an idle moment for KEYRUPT1.
+1. **TC LODSAMPT / RAND MNKEYIN reads the wrong value from ch015.** Our `channel_router_pump_input` writes the keycode via `WriteIO(state, 015, code & 037)` then sets `InterruptRequests[5]=1`. If `WriteIO`'s ch015 side-effect mutates the value before the handler reads it, RAND would see a wrong code. Verify: log `state->InputChannel[015]` at the moment of `RAND MNKEYIN` execution.
 
-5. **Our `peripheral_stub_tick` or `channel_router_on_routine` is clearing `InterruptRequests[5]`.** Pure paranoia — verify by reading both for any erasable/state writes that touch `state->InterruptRequests`.
+2. **NOVAC reads the 2CADR words at Q+0/Q+1 from the wrong bank.** This is the original `077615` hypothesis, now back on the table. Our trace already shows Q at the moment of dispatch (e.g. `Q=02471` for the second keypress observed). After `TC NOVAC` runs, Q should be `04041` (just past the TC). NOVAC's `INDEX Q; DCA 0` should then read `Fixed[2][041..042] = 034062, 056006`. If banking is off, it could read garbage. Verify: extend tracer window to capture the NOVAC body, not just the KEYRUPT1 lead-in.
+
+3. **Slot allocation in NOVAC2 writes to a wrong PRIORITY index.** After NOVAC2 figures out which slot is free, it stores PRIO and CADR via `INDEX NEWJOB; TS PRIORITY` etc. If `NEWJOB` is wrong-banked or computed wrong, CADR lands in an unrelated cell. Verify: dump the entire PRIORITY array at the moment NOVAC2 completes.
+
+4. **CHARIN's first instruction faults silently.** CHARIN at `PINBALL_GAME__BUTTONS_AND_LIGHTS.agc:475` starts `CAF ONE; XCH DSPLOCK; TS 21/22REG`. If `DSPLOCK` resolves to the wrong erasable cell, the executive's lock-tracking breaks immediately. Verify: trace through CHARIN's first ~10 instructions.
 
 ## Concrete next-session work
 
-1. **Extend the tracer to a "dispatcher trace" mode.** New Kconfig `AGC_TRACE_DISPATCH` (or fold into existing flag). Hook moves to log on **every cycle** (not just within an address window): `InterruptRequests[1..10]`, `AllowInterrupt`, `InIsr`, `RuptLock`, `Z`. Then we can see whether `InterruptRequests[5]` ever becomes 1 and what state the engine is in when it does. Rate-limit to one log per ms or accept the flood for a short capture window — even at 100kHz, single-line UART formatting takes too long; suggest a ring-buffer-to-RAM mode flushed at the end of a fixed cycle count.
+1. **Widen the KEYRUPT1 trace window** to cover the handler body, not just the 04024-04046 lead-in. The handler lives in a switched bank — we know FBANK at the moment of dispatch (FB=11000 octal observed). Two approaches:
+   - Hardcode the handler address range. `KEYRUPT1` (the label) is in `KEYRUPT,_UPRUPT.agc` after `SETLOC KEYRUPT`. The actual fixed address depends on what `KEYRUPT` is defined as — derive from `MAIN.agc.html` or by re-running yaYUL with listing.
+   - Or: latch the trace into "follow ISR" mode the moment we see `Z=04024 isr=1`, then dump every instruction until `InIsr` transitions to 0. This is simpler but produces 100-500 log lines per keypress. Acceptable for a focused diagnostic — keypress rate is low.
 
-2. **Once `InterruptRequests[5]==1` is observed, watch `InIsr` transitions.** The cycle where `InIsr` goes 1→0 with `InterruptRequests[5]==1` is the moment of truth. If the very next cycle has `Z=04024`, dispatch works (hypothesis 1 was right, original framing was just timing-sensitive). If `Z` goes somewhere else and `InterruptRequests[5]` is still 1, hypothesis 2/3/5 alive.
+2. **Make the keyrupt log include `RegA`/`RegL`/`InputChannel[015]` at every step.** When the handler executes `RAND MNKEYIN`, we want to see the masked keycode in A right after. If A reads as 0 (or anything other than 022 octal for an RSET press), the keycode path is broken before NOVAC.
 
-3. **Read `third_party/virtualagc/yaAGC/agc_engine.c` interrupt dispatch in full.** Specifically the block that compares `InterruptRequests[]` against priority and dispatches. yaAGC has subtle rules (e.g. interrupts can only be taken between instruction boundaries, can be locked by certain flags). Lines mentioned in earlier session notes: `:2480-2600`. Compare what the trace shows against what yaAGC expects.
+3. **After NOVAC's `DCA 0` instruction, log A:L (the 2CADR words).** Compare against the known-good ROM values `Fixed[2][041]=034062, Fixed[2][042]=056006` (per `test_cadr_resolution`). Mismatch → engine fetch bug (hypothesis 2). Match → slot allocation bug (hypothesis 3) is the next thing to investigate.
 
-4. **If hypothesis 4 (DOWNRUPT self-requeue) lands**, find where DOWNRUPT is re-armed. Likely culprit: our integration's downlink handling is missing a step that yaAGC's reference desktop integration includes (since the desktop integration uses `SocketAPI.c`, not our `channel_router`, so downlink-channel writes there go to a TCP peer that ACKs them — our channel_router silently discards them).
+4. **Spurious-keypress note**: the second keypress observed in this session was `code=07`, NOT posted by anything in our code. Likely the XPT2046 touch driver registering noise. Worth muting (a debounce / sanity threshold in `components/dsky_input/touch.c` or wherever the touch task posts keys) so we're not chasing ghost dispatches in future traces. Not the main bug, but adds noise to UART captures.
+
+5. **Cleanup**: once a fix lands, decide whether to keep `CONFIG_AGC_TRACE_KEYRUPT1` (probably yes, as `=n` it's free) and `test_cadr_resolution.c` (probably yes, as a standalone diagnostic). Add a real assertion-bearing host test for V35E lamp test once it works.
 
 ## Files to read first next session
 
@@ -75,7 +118,7 @@ If (a), then we still owe real assertion-bearing tests for `test_lamp_test` and 
 
 ## Original framing (kept for history)
 
-The original handoff text below predates the dispatcher-trace finding above. Slot-0 CADR observations may have been artifacts. Trust the new framing.
+The text below predates this session's findings. It was correct that something downstream of KEYRUPT1 is broken; it was wrong only about whether KEYRUPT1 itself fires. Trust the new framing at the top of the document. Slot-0 CADR `077615` observation may or may not still hold — re-verify with the widened tracer.
 
 ---
 
