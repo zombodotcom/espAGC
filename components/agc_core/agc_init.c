@@ -94,6 +94,34 @@ static void init_cpu_state(agc_t *State)
             State->Erasable[Bank][j] = 0;
     State->Erasable[0][RegZ] = 04000;       // Initial PC.
 
+    // Executive PRIORITY slots: mark all 8 job-slots as "free."
+    //
+    // Per Luminary099/ERASABLE_ASSIGNMENTS.agc:388-395, the executive's
+    // 8-slot job array starts at erasable offset 0167 (bank 0), with a
+    // 12-word stride per slot (MPAC..PRIORITY occupies the first 12
+    // erasable cells of each slot). The first word of each slot holds
+    // that slot's job priority; the AGC convention is that an empty
+    // slot stores negative zero (0o77777 in 1's-complement) so the
+    // slot-search code can recognize free slots by sign.
+    //
+    // The blanket zero-clear above leaves all 8 slots at 0, which the
+    // executive interprets as "occupied with priority 0" — a real
+    // (lowest-priority) dispatchable job. Specifically, this session's
+    // follow-ISR trace observed PRIORITY[0]=030110 with CADR[0]=0 at
+    // boot, before any keypress: Luminary's FRESH-START schedules a
+    // job into slot 0 with the right priority but the CADR write never
+    // arrives (probably an early NOVAC call that didn't find a free
+    // slot because slot 0 was already "occupied" at priority 0). The
+    // dispatched ghost then runs garbage from address 0 (= RegA),
+    // corrupting CADR[0] to 0o77615 over time and permanently
+    // blocking CHARIN keypresses from dispatching.
+    //
+    // Initializing slots to -0 = 0o77777 lets FRESH-START's scheduler
+    // find slot 0 free and populate it cleanly.
+    for (int slot = 0; slot < 8; slot++) {
+        State->Erasable[0][0167 + slot * 014] = 077777;
+    }
+
     State->CycleCounter = 0;
     State->ExtraCode = 0;
     State->AllowInterrupt = 1;

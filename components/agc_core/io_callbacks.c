@@ -63,60 +63,85 @@ static void dispatch_trace_step(agc_t *State)
 // instruction" pattern from flooding UART. Expected: 50-300 lines
 // per keypress.
 //
-// Watched erasable cells (one-shot deltas printed when they change):
+// Watched erasable cells (one-shot deltas printed when they change).
+// Per Luminary099/ERASABLE_ASSIGNMENTS.agc:388-395, each executive
+// "job slot" is 12 words: MPAC..MPAC+6 (7) + MODE + LOC + BANKSET +
+// PUSHLOC + PRIORITY. So PRIORITY is at offset 11 of the slot (the
+// LAST cell), and the job's entry address ("CADR") is in LOC at
+// offset 8. Slot 0 starts at erasable[0][0154] (MPAC[0]).
+//
 //   DSPLOCK   @ bank 2 offset 012  — CHARIN's `XCH DSPLOCK` sets it
-//   PRIO[0]   @ bank 0 offset 0167 — NOVAC slot allocation
-//   CADR[0]   @ bank 0 offset 0170 — slot 0 CADR after NOVAC2
+//   LOC[0]    @ bank 0 offset 0163 — slot 0's job entry address (CADR)
+//   PRIO[0]   @ bank 0 offset 0167 — slot 0's job priority
 static void keyrupt_trace_step(agc_t *State)
 {
     static bool following     = false;
     static int  last_z        = -1;
     static int  last_dsplock  = -1;
     static int  last_prio0    = -1;
-    static int  last_cadr0    = -1;
+    static int  last_loc0     = -1;
 
     int z   = State->Erasable[0][RegZ];
     int isr = State->InIsr;
 
-    // ENTRY: ISR running at KEYRUPT1 lead-in entry
+    // ENTRY: ISR running at KEYRUPT1 lead-in entry. Dump the full
+    // slot-0 cell block (MPAC..PRIORITY at 0154..0167) so we can see
+    // what's actually scheduled there.
     if (!following && isr && z == 04024) {
         following     = true;
         last_z        = -1;
         last_dsplock  = State->Erasable[2][012];
         last_prio0    = State->Erasable[0][0167];
-        last_cadr0    = State->Erasable[0][0170];
-        ESP_LOGI(KEYRUPT_TAG, "==KEYRUPT1 ENTRY== ch015=%05o DSPLOCK=%05o PRIO[0]=%05o CADR[0]=%05o",
+        last_loc0     = State->Erasable[0][0163];
+        ESP_LOGI(KEYRUPT_TAG,
+                 "==KEYRUPT1 ENTRY== ch015=%05o DSPLOCK=%05o",
                  State->InputChannel[015] & 077777,
-                 last_dsplock & 077777, last_prio0 & 077777, last_cadr0 & 077777);
+                 last_dsplock & 077777);
+        ESP_LOGI(KEYRUPT_TAG,
+                 "  slot0: MODE=%05o LOC=%05o BANKSET=%05o PUSHLOC=%05o PRIORITY=%05o",
+                 State->Erasable[0][0162] & 077777,
+                 State->Erasable[0][0163] & 077777,
+                 State->Erasable[0][0164] & 077777,
+                 State->Erasable[0][0165] & 077777,
+                 State->Erasable[0][0167] & 077777);
+        ESP_LOGI(KEYRUPT_TAG,
+                 "  slot1: MODE=%05o LOC=%05o BANKSET=%05o PUSHLOC=%05o PRIORITY=%05o",
+                 State->Erasable[0][0176] & 077777,
+                 State->Erasable[0][0177] & 077777,
+                 State->Erasable[0][0200] & 077777,
+                 State->Erasable[0][0201] & 077777,
+                 State->Erasable[0][0203] & 077777);
     }
     if (!following) return;
 
     // EXIT: ISR completed
     if (!isr) {
-        ESP_LOGI(KEYRUPT_TAG, "==RESUME== back to Z=%05o DSPLOCK=%05o PRIO[0]=%05o CADR[0]=%05o",
+        ESP_LOGI(KEYRUPT_TAG,
+                 "==RESUME== back to Z=%05o DSPLOCK=%05o slot0.LOC=%05o slot0.PRIO=%05o slot1.LOC=%05o slot1.PRIO=%05o",
                  z, State->Erasable[2][012] & 077777,
+                 State->Erasable[0][0163] & 077777,
                  State->Erasable[0][0167] & 077777,
-                 State->Erasable[0][0170] & 077777);
+                 State->Erasable[0][0177] & 077777,
+                 State->Erasable[0][0203] & 077777);
         following = false;
         return;
     }
 
-    // Watched-cell delta notes (fire BEFORE the per-instruction line
-    // so the cell change is attributed to the instruction that just ran)
+    // Watched-cell delta notes (fire BEFORE the per-instruction line)
     int dsplock = State->Erasable[2][012];
     int prio0   = State->Erasable[0][0167];
-    int cadr0   = State->Erasable[0][0170];
+    int loc0    = State->Erasable[0][0163];
     if (dsplock != last_dsplock) {
         ESP_LOGI(KEYRUPT_TAG, "  >> DSPLOCK %05o -> %05o", last_dsplock & 077777, dsplock & 077777);
         last_dsplock = dsplock;
     }
     if (prio0 != last_prio0) {
-        ESP_LOGI(KEYRUPT_TAG, "  >> PRIO[0] %05o -> %05o", last_prio0 & 077777, prio0 & 077777);
+        ESP_LOGI(KEYRUPT_TAG, "  >> slot0.PRIORITY %05o -> %05o", last_prio0 & 077777, prio0 & 077777);
         last_prio0 = prio0;
     }
-    if (cadr0 != last_cadr0) {
-        ESP_LOGI(KEYRUPT_TAG, "  >> CADR[0] %05o -> %05o", last_cadr0 & 077777, cadr0 & 077777);
-        last_cadr0 = cadr0;
+    if (loc0 != last_loc0) {
+        ESP_LOGI(KEYRUPT_TAG, "  >> slot0.LOC %05o -> %05o", last_loc0 & 077777, loc0 & 077777);
+        last_loc0 = loc0;
     }
 
     // Per-instruction dedup
