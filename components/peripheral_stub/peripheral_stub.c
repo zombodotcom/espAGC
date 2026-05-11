@@ -316,14 +316,91 @@ void peripheral_stub_step(agc_t *state, uint32_t dt_us)
     push_cdu_delta(state, CDUZ_COUNTER, &g_att_z_mdeg, &g_pimu_z_mdeg);
 }
 
-// DAPBOOLS @ erasable 0111 (bank 0 unswitched). ACCSOKAY = BIT3 = 04.
-#define DAPBOOLS_OFFSET   0111
-#define ACCSOKAY_BIT      04
-// MASS @ 01244 -> Erasable[2][0244]. CSMMASS @ 01245.
-#define MASS_BANK         2
-#define MASS_HI_OFFSET    0244
-#define MASS_LO_OFFSET    0245
-#define MASS_FULLAPS      05050     // FULLAPS from CONTROLLED_CONSTANTS.agc
+// Stuck-job recovery via simulated GOJAM. Cold-boot Luminary's
+// 1/ACCSET (PRIO27 + offset 110 = priority 027110, allocated by
+// DAPIDLER) enters interpretive code that gets caught in
+// INTERPRETER.agc:681 GOTO indirection with POLISH=0 reading
+// Erasable[4][044]=0 indefinitely. Block II AGC is non-preemptive
+// and the GOTOERS loop doesn't reach DANZIG (where NEWJOB is
+// checked), so the executive can never swap CHARIN in.
+//
+// Real Apollo had this never happen because the crew's pre-launch
+// PAD LOAD set MASS/DAP coefficients to values that let 1/ACCS
+// converge cleanly. Without those values, 1/ACCS's interpretive
+// computation degenerates. LM_Simulator over a socket would also
+// keep the engine fed via ParseIoPacket / UnprogrammedIncrement.
+//
+// Recovery: when NEWJOB indicates a higher-priority job is waiting
+// across multiple consecutive ticks (current job never yields),
+// simulate a hardware GOJAM — the same recovery yaAGC does on alarm
+// trips (agc_engine.c:2246-2295). GOJAM sets Z=04000, clears
+// interrupt state, and runs FRESH_START → DORSTART, which restarts
+// the system from a known-clean state. The pending CHARIN job in
+// slot 1 is restored by DORSTART's RESTART logic (slot CADRs are
+// preserved across software restarts), so the keypress that
+// triggered the original CHARIN allocation gets processed normally.
+// Rescue can fire multiple times. Each GOJAM gets the engine past
+// one round of 1/ACCSET deadlock, but since FRESH_START re-clears
+// RCSFLAGS bit 13, DAPIDLER will re-NOVAC 1/ACCSET on its next
+// T5RUPT. The rescue fires again on the next stuck detection. Cap at
+// MAX_RESCUES to avoid runaway GOJAM if something else is broken.
+#define STUCK_THRESHOLD   2
+#define MAX_RESCUES       16
+static int      g_last_newjob   = 0;
+static int      g_stuck_count   = 0;
+static int      g_rescue_count  = 0;
+
+static void simulate_gojam(agc_t *s)
+{
+    // Mirror agc_engine.c GOJAM (line 2246-2298) exactly.
+    s->ExtraDelay += 2;                      // GOJAM + TC 4000 timing
+    s->Erasable[0][2] = s->Erasable[0][5];   // RegQ <- old Z
+    s->Erasable[0][5] = 04000;               // RegZ -> FRESH_START
+    s->InIsr = 0;
+    s->AllowInterrupt = 1;
+    s->ParityFail = 0;
+    s->Trap31A = s->Trap31B = s->Trap32 = 0;
+    for (int i = 1; i <= NUM_INTERRUPT_TYPES; i++) s->InterruptRequests[i] = 0;
+    s->InputChannel[005] = 0;
+    s->InputChannel[006] = 0;
+    s->InputChannel[010] = 0;
+    s->InputChannel[011] = 0;
+    s->InputChannel[012] = 0;
+    s->InputChannel[013] = 0;
+    s->InputChannel[014] = 0;
+    s->InputChannel[033] |= 002000;          // UPLINK TOO FAST
+    s->InputChannel[034] = 0;
+    s->InputChannel[035] = 0;
+    s->DownruptTimeValid = 0;
+    s->IndexValue = 0;
+    s->ExtraCode = 0;
+    s->SubstituteInstruction = 0;
+    s->PendFlag = 0;
+    s->PendDelay = 0;
+    s->TookBZF = 0;
+    s->TookBZMF = 0;
+    s->RestartLight = 1;
+    s->GeneratedWarning = 1;
+}
+
+static void rescue_stuck_job(agc_t *state)
+{
+    if (g_rescue_count >= MAX_RESCUES) return;
+    int newjob = state->Erasable[0][067] & 077777;
+    int swap_pending = (newjob != 0 && newjob != 077777);
+
+    if (swap_pending && newjob == g_last_newjob) {
+        g_stuck_count++;
+        if (g_stuck_count >= STUCK_THRESHOLD) {
+            simulate_gojam(state);
+            g_stuck_count = 0;
+            g_rescue_count++;
+        }
+    } else {
+        g_stuck_count = 0;
+    }
+    g_last_newjob = newjob;
+}
 
 void peripheral_stub_tick(agc_t *state)
 {
@@ -332,16 +409,18 @@ void peripheral_stub_tick(agc_t *state)
     // (~200ms simulated time). Drive one simulator step per tick.
     peripheral_stub_step(state, 200000);
 
-    // Persist PAD-LOAD state: MASS valid + ACCSOKAY set. Real Apollo
-    // does these via crew V21N47E (mass) and via 1/ACCS completion.
-    // Luminary's POODOO/BAILOUT/ABORT software-restart paths clear
-    // DAPBOOLS to BOOLSTRT (no ACCSOKAY) and may zero MASS. By
-    // re-asserting these every tick we ensure DAPIDLER's CHECKUP
-    // path stays on STARTDAP rather than the MOREIDLE block that
-    // starves CHARIN. Equivalent to the operator re-issuing PAD LOAD
-    // after every software restart.
-    state->Erasable[MASS_BANK][MASS_HI_OFFSET] = MASS_FULLAPS;
-    state->Erasable[MASS_BANK][MASS_LO_OFFSET] = 0;
-    state->Erasable[0][DAPBOOLS_OFFSET] |= ACCSOKAY_BIT;
-    state->Erasable[2][0273] |= 04000;     // RCSFLAGS BIT13 — skip 1/ACCSET
+    rescue_stuck_job(state);
+
+    // Continuously assert RCSFLAGS bit 13. DAPIDLER's T5RUPT checks
+    // this bit and only NOVACs 1/ACCSET if it's CLEAR. FRESH_START
+    // explicitly clears it (FRESH_START_AND_RESTART.agc:430), but
+    // we keep re-setting it from outside so DAPIDLER takes the
+    // CHECKUP branch instead of allocating 1/ACCSET — which is the
+    // job that gets stuck in V67WW INTWAKE loop. Only re-assert AFTER
+    // at least one rescue has fired, so we don't perturb the very
+    // first FRESH_START's setup.
+    // RCSFLAGS at erasable 01273 = Erasable[2][0273]. BIT13 = 04000.
+    if (g_rescue_count > 0) {
+        state->Erasable[2][0273] |= 04000;
+    }
 }
