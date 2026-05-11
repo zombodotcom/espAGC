@@ -23,6 +23,7 @@
 #include "dsky_input.h"
 #include "display_panel_iface.h"
 #include "led_status_iface.h"
+#include "peripheral_stub.h"
 #include "touch_input.h"
 #include "dsky_layout.h"
 
@@ -94,6 +95,12 @@ void app_main(void)
         ESP_LOGE(TAG, "agc_core_init failed: %d", rc);
         return;
     }
+
+    // Initialize the peripheral simulator. Future stages of this will
+    // continuously drive ch030/031/032/033 and push CDU counter pulses
+    // (mimicking what LM_Simulator does on Pi/Linux). For now it's a
+    // hook for that work.
+    peripheral_stub_init();
 
     dsky_input_config_t in_cfg = {
         .enable_wifi_ap = true,

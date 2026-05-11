@@ -28,6 +28,7 @@ void harness_boot(void)
     channel_router_init();
     int rc = agc_core_init(rom, sz);
     if (rc != 0) { fprintf(stderr, "agc_core_init -> %d\n", rc); exit(1); }
+    peripheral_stub_init();   // seed MASS / DAPBOOLS so 1/ACCS converges
     free(rom);
 }
 

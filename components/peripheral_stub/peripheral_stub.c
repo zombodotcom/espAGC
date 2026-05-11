@@ -63,6 +63,10 @@
 void peripheral_stub_init(void)
 {
     // Nothing to do at init; tick is idempotent and self-correcting.
+    // (Erasable-cell seeding was tried and found insufficient: Luminary's
+    // FRESH-START rezeros DAPBOOLS, and the real fix needs a live
+    // peripheral simulator like LM_Simulator on Pi/Linux — continuously
+    // driving channels and CDU counter pulses, not a one-shot seed.)
 }
 
 void peripheral_stub_tick(agc_t *state)
