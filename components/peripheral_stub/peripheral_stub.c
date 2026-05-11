@@ -60,19 +60,22 @@
 #define DSPTAB_GL_NOATT       (DSPTAB_NOATT | DSPTAB_GIMBAL_LOCK)
 #define DSPTAB_REQUEST        040000u
 
-// LM_Simulator's boot-time channel values (lm_simulator.tcl:570-572).
-// LM_Simulator writes these via socket on connect; we write them via
-// the engine's WriteIO entry point (same path the socket eventually
-// reaches through agc_engine.c's input-packet handler).
+// Boot-time channel values matching the *recorded* Apollo 11 launch
+// transcript (third_party/virtualagc/yaDSKY2/Apollo11-launch.canned).
+// At time 0 the recording shows LM_Simulator writing:
+//   ch30 = 0o37377, ch31 = 0o57777, ch34 = 0o37377, ch35 = 0o57777
+// then transitioning to other values as the boot progresses.
+// These differ from lm_simulator.tcl's wdata() defaults (0o36331, etc.)
+// because LM_Simulator processes state before sending. The recorded
+// values are what Luminary actually saw at boot in a known-working run.
 //
-//   wdata(30)  = "011110011011001"  -> 0o36331
-//   wdata(31)  = "111111111111111"  -> 0o77777
-//   wdata(32)  = "010001111111111"  -> 0o21777
-//   wdata(33)  = "101111111111110"  -> 0o57776
-#define LM_SIM_CH030  036331
-#define LM_SIM_CH031  077777
-#define LM_SIM_CH032  021777
-#define LM_SIM_CH033  057776
+// ch32/ch33 are kept at the LM_Simulator wdata defaults (021777, 057776)
+// since the recording doesn't show explicit writes to them at time 0
+// (they were probably initialized by yaAGC's own boot defaults).
+#define LM_SIM_CH030  037377   // recorded launch value
+#define LM_SIM_CH031  057777   // recorded launch value
+#define LM_SIM_CH032  021777   // LM_Simulator wdata default
+#define LM_SIM_CH033  057776   // LM_Simulator wdata default
 
 // Step accounting: tracks total simulated time and pulse-emission cadence.
 // Reset by peripheral_stub_init.
