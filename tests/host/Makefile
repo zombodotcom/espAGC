@@ -99,7 +99,8 @@ yaagc_ref.exe: yaagc_ref.c $(YAAGC)/agc_engine.c $(YAAGC)/agc_engine_init.c \
 # Diagnostic-only tests — build with the same rule as LAYER2 but not
 # included in the default `run` target since they're investigation
 # probes (long printouts, no assertions).
-DIAG_TESTS   := test_z_histogram test_hotloop_disasm test_restart_path \
+DIAG_TESTS   := test_v37_final_crash test_v37_find_seq \
+                test_z_histogram test_hotloop_disasm test_restart_path \
                 test_keypress_response test_stuck_loop_state \
                 test_delayed_rset_keypress test_find_keyrupt1 \
                 test_slots_correct test_find_dsplock test_no_autorset_verb \
@@ -136,8 +137,9 @@ $(addsuffix .exe, $(LAYER2_TESTS) $(LAYER2_FAILING_TESTS)): %.exe: %.c $(HARNESS
 	$(CC) $(CFLAGS) -DCONFIG_AGC_AUTO_RSET_AT_BOOT=1 $(HARNESS_INC) -o $@ $^ -lm
 
 # Diagnostic tests use the same build rule. Not in `run` target.
+# -lpthread for the async-keypress-based diagnostics; harmless for others.
 $(addsuffix .exe, $(DIAG_TESTS)): %.exe: %.c $(HARNESS_SRCS)
-	$(CC) $(CFLAGS) -DCONFIG_AGC_AUTO_RSET_AT_BOOT=1 $(HARNESS_INC) -o $@ $^ -lm
+	$(CC) $(CFLAGS) -DCONFIG_AGC_AUTO_RSET_AT_BOOT=1 $(HARNESS_INC) -o $@ $^ -lm -lpthread
 
 # --- Layer 2b: renderer pixel tests ---------------------------------------
 RENDER_SRCS := \
