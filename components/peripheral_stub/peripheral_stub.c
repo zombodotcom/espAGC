@@ -195,15 +195,12 @@ void peripheral_stub_init(void)
     agc_t *state = agc_core_state();
     if (state == NULL) return;
 
-    // Match LM_Simulator's startup channel writes. We use direct
-    // InputChannel assignment here (rather than WriteIO) because we're
-    // running at boot before any engine cycle has executed — the
-    // distinction is invisible: both update the channel state the
-    // engine sees on its first cycle. The periodic step (below) uses
-    // direct writes too, matching what the engine's socket-input path
-    // does after parsing an external packet (agc_engine.c:WriteIO()
-    // is the CPU-side write; the socket-input path uses the same
-    // InputChannel array via ParseIoPacket).
+    // Match LM_Simulator's startup channel writes (canonical Pi/Linux
+    // setup writes these once via write_ini_values() shortly after
+    // socket connect — see Contributed/LM_Simulator/lm_simulator.tcl:
+    // 591-600). Use direct InputChannel assignment: pre-engine boot
+    // is equivalent to the engine's ChannelInput path parsing socket
+    // packets, both populate State->InputChannel.
     state->InputChannel[030] = LM_SIM_CH030;
     state->InputChannel[031] = LM_SIM_CH031;
     state->InputChannel[032] = LM_SIM_CH032;
@@ -282,24 +279,21 @@ void peripheral_stub_step(agc_t *state, uint32_t dt_us)
     g_step_time_us += dt_us;
     g_pulse_phase++;
 
-    // Continuous channel feed at lm_simulator.tcl's cadence (every step).
-    // LM_Simulator writes all four of 30/31/32/33 every tick — match
-    // that to keep our engine state stable across NW-alarm GOJAM cycles.
-    // Removing the rewrite for the WSL comparison test makes our build
-    // produce identical channel-value sets to reference, but our
-    // cycle-driven engine then enters cold-boot deadlock without it.
-    state->InputChannel[030] = LM_SIM_CH030;
-    state->InputChannel[031] = LM_SIM_CH031;
-    state->InputChannel[032] = LM_SIM_CH032;
-    state->InputChannel[033] = LM_SIM_CH033;
+    // No continuous channel rewrite: canonical lm_simulator.tcl
+    // (Contributed/LM_Simulator/lm_simulator.tcl:591-600) writes
+    // ch16/30/31/32/33 ONCE at startup via write_ini_values(); thereafter
+    // it only writes when peripheral state actually changes (CDU pulses,
+    // IMU events, etc.). peripheral_stub_init() handles the one-shot
+    // startup write. Refreshing every tick prevented Luminary from ever
+    // observing state transitions on these channels — papering over
+    // the cold-boot deadlock that was actually caused by InhibitAlarms=1
+    // (now removed) combined with 12x-too-fast cycle pacing (now fixed).
+    (void)state;
 
     // No attitude/CDU simulation in this step. WSL reference yaAGC has
     // no LM_Simulator running for the V37E00E test and still produces
     // PRG=00 — the CDU pulses and jet integration aren't needed for
-    // the verb-completion path. Running them was injecting CDU
-    // unprogrammed-sequence increments into the engine FIFO, which
-    // caused extra COUNTER interrupt churn that diverges our state
-    // from the reference.
+    // the verb-completion path.
     (void)decode_jets; (void)push_cdu_delta;
     (void)g_zero_imu;
     (void)g_att_x_mdeg; (void)g_att_y_mdeg; (void)g_att_z_mdeg;

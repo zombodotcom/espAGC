@@ -66,6 +66,12 @@ LAYER2_FAILING_TESTS := test_p00_select_retry
 test_ref_compare.exe: test_ref_compare.c $(HARNESS_SRCS)
 	$(CC) $(CFLAGS) -DCONFIG_AGC_LOG_ALL_OUTPUTS=1 $(HARNESS_INC) -o $@ $^ -lm -lpthread
 
+# test_state_compare writes yaAGC-format core dumps at 1-sec wall-clock
+# intervals while driving the V37E00E sequence. Use parse_core_dump.py
+# to diff against tests/host/wsl_dumps/ref/core.NNN (WSL ground truth).
+test_state_compare.exe: test_state_compare.c $(HARNESS_SRCS)
+	$(CC) $(CFLAGS) -DCONFIG_AGC_LOG_ALL_OUTPUTS=1 $(HARNESS_INC) -o $@ $^ -lm -lpthread
+
 # verify-ref: run our build through the same V35E + V37E00E sequence as
 # ref_capture.py and assert no must-match channel emits values the
 # reference doesn't. Real comparison test against captured ground truth.

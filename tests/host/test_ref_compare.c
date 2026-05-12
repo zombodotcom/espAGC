@@ -73,13 +73,14 @@ int main(void) {
     pthread_t tid;
     pthread_create(&tid, NULL, key_thread, plan);
 
-    // Total budget: ~17 sec wall-clock = 17M cycles at 1 MHz.
-    // harness_step_realtime paces 1024-cycle batches to 1 MHz, so this
-    // takes ~17 sec wall-clock. Key thread fires keys at wall-clock
-    // intervals (0.1s intra-token, 3s inter-token); their arrival
-    // cycle alignment is asynchronous to engine state, matching how
-    // yaAGC handles socket-input keypresses in WSL.
-    harness_step_realtime(17000000);
+    // Total budget: ~25 sec wall-clock. harness_step_realtime now paces
+    // at AGC_PER_SECOND = 85,333 cycles/sec (real Block II MCT rate,
+    // matching upstream yaAGC's SimExecute). 25s * 85,333 ≈ 2.13M.
+    // Key thread fires keys at wall-clock intervals (0.1s intra-token,
+    // 3s inter-token); their arrival cycle alignment is asynchronous
+    // to engine state, matching how yaAGC handles socket-input
+    // keypresses in WSL.
+    harness_step_realtime(85333 * 25);
 
     pthread_join(tid, NULL);
 

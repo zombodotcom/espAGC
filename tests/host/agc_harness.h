@@ -76,6 +76,15 @@ void harness_type(const char *seq, int gap_cycles);
 // deterministic-but-bad cycle alignments and miss state transitions.
 void harness_step_realtime(int n_cycles);
 
+// Write the engine state to `path` in the same ASCII-octal format yaAGC's
+// MakeCoreDump uses (see agc_engine_init.c:441). Lets us diff our state
+// against a WSL reference dump cell-by-cell. Returns 0 on success, -1
+// on file-open failure.
+int harness_make_core_dump(const char *path);
+
+// Read the cycle counter directly.
+unsigned long long harness_cycle_counter(void);
+
 #ifdef __cplusplus
 }
 #endif

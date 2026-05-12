@@ -37,7 +37,6 @@ static inline uint64_t now_us(void) {
 #include "agc_engine.h"
 
 extern agc_t *agc_core_state(void);
-extern int InhibitAlarms;
 
 void harness_boot(void)
 {
@@ -47,14 +46,13 @@ void harness_boot(void)
     int rc = agc_core_init(rom, sz);
     if (rc != 0) { fprintf(stderr, "agc_core_init -> %d\n", rc); exit(1); }
     peripheral_stub_init();
-    // Suppress yaAGC's TC-Trap / NightWatchman / RuptLock GOJAM-on-alarm
-    // behavior. These alarms fire on the host build during normal boot
-    // (~6 TCTrap + 2 NW per 1M cycles even with no peripheral activity)
-    // and wipe slot allocations before CHARIN can run for a keypress.
-    // Pi/Linux yaAGC builds also expose this as the `--inhibit-alarms`
-    // command-line option; we set it programmatically since we don't
-    // have a CLI. Alarm latches still appear in ch77 for observation.
-    InhibitAlarms = 1;
+    // No alarm-inhibit: upstream yaAGC's natural cold-boot recovery
+    // depends on NW / TC-Trap firing during STARTSUB, triggering GOJAM,
+    // and looping through FRESH_START until the engine reaches PINBALL.
+    // See third_party/virtualagc/yaAGC/agc_engine.c:2242. Earlier we set
+    // InhibitAlarms=1 because alarm rate was 12x too high (pacing was
+    // 1 MHz instead of AGC_PER_SECOND=85,333). With harness_step_realtime
+    // now pacing correctly, alarms fire at canonical rate.
     free(rom);
 }
 
@@ -99,21 +97,25 @@ void harness_post_key(int code)
     channel_router_post_key(code);
 }
 
-// Real-time-paced step. Matches yaAGC's SimExecute behavior on Linux:
-// catch up to wall-clock at 1 MHz. Runs cycles in small batches and
-// busy-waits between batches to maintain the target rate.
-//
-// The pacing keeps T3/T4/T5RUPT timer firings at their wall-clock
-// alignment relative to async keypresses arriving from another thread.
-// Back-to-back execution puts firings at deterministic-but-pathological
-// offsets that crash Luminary's bank-switching paths (V37+ENTR → NEWMODE).
+// Real-time-paced step. Matches upstream yaAGC's SimExecute pacing:
+// agc_engine() is called at AGC_PER_SECOND (85,333) calls per real
+// second — the Block II AGC's actual MCT rate. Earlier versions of
+// this function paced at 1 MHz (1us per cycle), which was 12x too
+// fast and caused our engine to over-execute between async keypress
+// arrivals, missing the timer-rupt / CHARIN-dispatch alignment that
+// V37E00E relies on. Verified by comparing CycleCounter against WSL
+// yaAGC core dumps: ours hit 19M cycles in 19s wall-clock vs WSL's
+// 1.7M in the same window before the fix.
 void harness_step_realtime(int n_cycles)
 {
     if (n_cycles <= 0) return;
-    // Match yaAGC's SimExecute pacing on Linux: times() has 10ms
-    // granularity, so the engine runs ~10240 cycles in a burst when
-    // wall-time has advanced one CLK_TCK tick. We mimic that here.
-    const int batch = 10240;
+    // yaAGC's SimExecute on Linux uses times() with CLK_TCK=100 (10ms
+    // ticks) and runs AGC_PER_SECOND/CLK_TCK ≈ 853 cycles per tick.
+    // We use a slightly smaller batch for finer pacing on Windows.
+    const int batch = 256;
+    // 1e6 us / AGC_PER_SECOND = ~11.72 us per cycle.
+    const uint64_t us_per_cycle_num = 1000000ULL;
+    const uint64_t us_per_cycle_den = 85333ULL;  // AGC_PER_SECOND
     uint64_t t0 = now_us();
     long elapsed_cycles = 0;
     while (elapsed_cycles < n_cycles) {
@@ -126,8 +128,8 @@ void harness_step_realtime(int n_cycles)
             agc_core_step(this_batch);
         }
         elapsed_cycles += this_batch;
-        // Target wall-clock for this batch: t0 + elapsed_cycles us
-        uint64_t target = t0 + (uint64_t)elapsed_cycles;
+        uint64_t target = t0 +
+            (uint64_t)elapsed_cycles * us_per_cycle_num / us_per_cycle_den;
         uint64_t now = now_us();
         while (now < target) {
             int64_t gap = (int64_t)(target - now);
@@ -167,6 +169,53 @@ void harness_failreg(harness_failreg_t *out)
     out->latest = s->Erasable[0][0375];
     out->second = s->Erasable[0][0376];
     out->third  = s->Erasable[0][0377];
+}
+
+unsigned long long harness_cycle_counter(void)
+{
+    return (unsigned long long)agc_core_state()->CycleCounter;
+}
+
+// Mirror agc_engine_init.c:MakeCoreDump exactly so the output is
+// byte-identical to yaAGC's --dump-time core dumps. Layout:
+//   512 InputChannel  |  8x256 Erasable  |  CycleCounter
+//   ExtraCode, AllowInterrupt, PendFlag, PendDelay, ExtraDelay
+//   OutputChannel7  |  16x OutputChannel10  |  IndexValue
+//   11x InterruptRequests  |  InIsr, SubstituteInstruction
+//   DownruptTimeValid, DownruptTime, Downlink
+int harness_make_core_dump(const char *path)
+{
+    agc_t *s = agc_core_state();
+    FILE *fp = fopen(path, "w");
+    if (!fp) return -1;
+
+    for (int i = 0; i < NUM_CHANNELS; i++)
+        fprintf(fp, "%06o\n", (unsigned)(s->InputChannel[i] & 0xFFFF));
+
+    for (int bank = 0; bank < 8; bank++)
+        for (int j = 0; j < 0400; j++)
+            fprintf(fp, "%06o\n", (unsigned)(s->Erasable[bank][j] & 0xFFFF));
+
+    fprintf(fp, "%llo\n", (unsigned long long)s->CycleCounter);
+    fprintf(fp, "%o\n", s->ExtraCode);
+    fprintf(fp, "%o\n", s->AllowInterrupt);
+    fprintf(fp, "%o\n", s->PendFlag);
+    fprintf(fp, "%o\n", s->PendDelay);
+    fprintf(fp, "%o\n", s->ExtraDelay);
+    fprintf(fp, "%o\n", s->OutputChannel7);
+    for (int i = 0; i < 16; i++)
+        fprintf(fp, "%o\n", s->OutputChannel10[i]);
+    fprintf(fp, "%o\n", s->IndexValue);
+    for (int i = 0; i < 1 + NUM_INTERRUPT_TYPES; i++)
+        fprintf(fp, "%o\n", s->InterruptRequests[i]);
+    fprintf(fp, "%o\n", s->InIsr);
+    fprintf(fp, "%o\n", s->SubstituteInstruction);
+    fprintf(fp, "%o\n", s->DownruptTimeValid);
+    fprintf(fp, "%llo\n", (unsigned long long)s->DownruptTime);
+    fprintf(fp, "%o\n", s->Downlink);
+
+    fclose(fp);
+    return 0;
 }
 
 static int parse_one(char c)

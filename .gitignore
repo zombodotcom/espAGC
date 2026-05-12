@@ -19,3 +19,9 @@ tests/host/*.exe
 tests/host/*.o
 build_yayul_test/
 tests/host/local.log
+
+# WSL comparison core dumps + python bytecode (ephemeral, regenerable)
+tests/host/wsl_dumps/host*/
+tests/host/wsl_dumps/run_*/
+tests/host/wsl_dumps/ref/core
+tests/host/__pycache__/
