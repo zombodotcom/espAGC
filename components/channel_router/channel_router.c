@@ -233,9 +233,14 @@ static void diag_log(int channel, int value)
         ESP_LOGI(TAG, "ch010 row=%2d payload=%04o (left=%2d right=%2d)",
                  row, payload, (payload >> 5) & 0x1F, payload & 0x1F);
     } else if (channel == 011) {
+        // ch011 cycles through 0→20000→20002 forever in PINBALL's flash
+        // routine. Dedup catches "same as last" but a 3-state cycle floods
+        // the log. Throttle to log only every Nth distinct value.
         if (value == g_last_ch11) return;
         g_last_ch11 = value;
-        ESP_LOGI(TAG, "ch011 value=%05o", value);
+        static int s_ch11_throttle = 0;
+        if ((++s_ch11_throttle & 31) != 0) return;   // 1-in-32
+        ESP_LOGI(TAG, "ch011 value=%05o (1/32 sampled)", value);
     } else if (channel == 0163) {
         if (value == g_last_ch163) return;
         g_last_ch163 = value;
