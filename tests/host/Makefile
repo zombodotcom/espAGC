@@ -73,6 +73,16 @@ test_ref_compare.exe: test_ref_compare.c $(HARNESS_SRCS)
 verify-ref: test_ref_compare.exe
 	@ROM=$(ROM) ./test_ref_compare.exe > local.log 2>&1 || true
 	@bash verify_ref_match.sh local.log golden/ref_V35E_V37E00E.log
+# test_ref_v37_slots — drives V37E00E against upstream agc_engine_init.c
+# (no channel_router, no peripheral_stub_tick) and dumps slot 0 state at
+# each step. Optional --sim flag interleaves peripheral_stub_step every
+# 10K cycles. Built standalone because it uses upstream init, not ours.
+test_ref_v37_slots.exe: test_ref_v37_slots.c $(YAAGC)/agc_engine.c $(YAAGC)/agc_engine_init.c \
+                       $(YAAGC)/Backtrace.c $(YAAGC)/DecodeDigitalDownlink.c \
+                       $(YAAGC)/NullAPI.c $(YAAGC)/rfopen.c \
+                       $(PSTUB)/peripheral_stub.c
+	$(CC) $(CFLAGS) $(HARNESS_INC) -o $@ $^ -lm
+
 # yaagc_ref — vanilla yaAGC reference harness. Links upstream's
 # agc_engine_init.c directly (not our agc_init.c) and NullAPI.c (no
 # socket layer). Optional --sim flag interleaves peripheral_stub_step
