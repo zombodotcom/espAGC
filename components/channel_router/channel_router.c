@@ -216,6 +216,13 @@ static int g_last_ch163 = -1;
 
 static void diag_log(int channel, int value)
 {
+#ifdef CONFIG_AGC_LOG_ALL_OUTPUTS
+    // Raw-output mode for golden-trace comparison against the reference
+    // yaAGC. Format matches tests/host/ref_capture.py output exactly so
+    // diff(1) can be used directly against tests/host/golden/*.log.
+    printf("  OUT ch%03o = %05o\n", channel, value & 077777);
+    fflush(stdout);
+#endif
     if (channel == 010) {
         int row = (value >> 11) & 0x0F;
         int payload = value & 0x07FF;

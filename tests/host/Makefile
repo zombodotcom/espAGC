@@ -60,6 +60,19 @@ LAYER2_TESTS := test_alarm_at_boot test_p00_select test_lamp_test \
                 test_failreg_diagnostic test_lm_idle_quiet \
                 test_executive_state test_charin_dispatch
 LAYER2_FAILING_TESTS := test_p00_select_retry
+
+# test_ref_compare needs CONFIG_AGC_LOG_ALL_OUTPUTS for raw-channel
+# emission. Built separately with its own rule.
+test_ref_compare.exe: test_ref_compare.c $(HARNESS_SRCS)
+	$(CC) $(CFLAGS) -DCONFIG_AGC_AUTO_RSET_AT_BOOT=1 -DCONFIG_AGC_LOG_ALL_OUTPUTS=1 $(HARNESS_INC) -o $@ $^ -lm
+
+# verify-ref: run our build through the same V35E + V37E00E sequence as
+# ref_capture.py and assert no must-match channel emits values the
+# reference doesn't. Real comparison test against captured ground truth.
+.PHONY: verify-ref
+verify-ref: test_ref_compare.exe
+	@ROM=$(ROM) ./test_ref_compare.exe > local.log 2>&1 || true
+	@bash verify_ref_match.sh local.log golden/ref_V35E_V37E00E.log
 # yaagc_ref — vanilla yaAGC reference harness. Links upstream's
 # agc_engine_init.c directly (not our agc_init.c) and NullAPI.c (no
 # socket layer). Optional --sim flag interleaves peripheral_stub_step

@@ -18,3 +18,4 @@ host_tools/
 tests/host/*.exe
 tests/host/*.o
 build_yayul_test/
+tests/host/local.log
