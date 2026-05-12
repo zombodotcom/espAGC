@@ -523,8 +523,8 @@ static void dispatch_pending_charin(agc_t *s)
     // disturbed — that breaks normal verb-execution flow (e.g., V37
     // sleeps in INTSTALL waiting for the user to type the program
     // number; if we kill its slot, the program-change never completes).
-    int active_prio = s->Erasable[0][0167] & 077777;
-    if (active_prio != STUCK_1_ACCSET_PRIO) return;
+    int active_prio_check = s->Erasable[0][0167] & 077777;
+    if (active_prio_check != STUCK_1_ACCSET_PRIO) return;
 
     // Look for a CHARIN slot (skip slot 0, which is the active set).
     int charin_slot = -1;
@@ -563,6 +563,99 @@ static void dispatch_pending_charin(agc_t *s)
     s->OutputChannel7 |= 0100;                // superbank bit
     s->Erasable[0][067] = 077777;             // NEWJOB cleared
     ESP_LOGI(PSTUB_TAG, "dispatch_pending_charin fired (slot %d)", charin_slot);
+}
+
+// ============================================================================
+// Aggressive CHARIN force-dispatch (the actual cold-boot fix).
+//
+// Past sessions found that when the AGC is in its cold-boot deadlock,
+// KEYRUPT1 fires and NOVAC tries to allocate a CHARIN slot, but the
+// resulting slot has WRONG values: PRIORITY=00110 (missing CHRPRIO
+// contribution), LOC=0 (missing CHARIN entry), BANKSET=02077 (the
+// CHARIN low-half stored in the wrong cell). The slot never dispatches.
+//
+// Mechanism: when channel_router queues a keypress, it calls
+// peripheral_stub_on_keypress_posted() which arms a force-dispatch
+// timer. If the engine hasn't reached CHARIN code within FORCE_DISPATCH_
+// TICKS ChannelRoutine ticks (~50ms simulated), we manually set up the
+// engine to execute CHARIN with the correct entry point + bank state +
+// ch015 key code. This bypasses the broken NOVAC slot allocation.
+//
+// CHARIN reads ch015 directly (not from the slot), so as long as
+// channel_router_pump_input has written ch015 (which it does before
+// posting the IR5 KEYRUPT1 request), the key code is available.
+// ============================================================================
+#define FORCE_DISPATCH_TICKS  6      // ~50ms simulated (6 * 8191 cycles)
+#define MAX_FORCE_DISPATCHES  100    // generous cap; one per keypress
+
+static volatile int g_keypress_pending = 0;
+static volatile int g_keypress_ticks   = 0;
+static int          g_force_dispatches = 0;
+
+void peripheral_stub_on_keypress_posted(uint8_t code)
+{
+    (void)code;
+    g_keypress_pending = 1;
+    g_keypress_ticks = 0;
+}
+
+// Returns 1 if engine has recently been executing CHARIN code.
+// CHARIN is in bank 040 (FBANK=030, SUPERBANK bit set in ch7). Entry
+// point is offset 02077 but the routine extends several hundred words.
+// We accept Z in [02077, 02300] with the right bank state.
+static int engine_is_in_charin(agc_t *s)
+{
+    int z  = s->Erasable[0][5] & 077777;
+    int fb = (s->Erasable[0][4] >> 10) & 037;
+    int sb = (s->OutputChannel7 & 0100) != 0;
+    // FB=030 (decimal 24) + SUPERBANK → bank 040.
+    if (fb == 030 && sb && z >= 02000 && z <= 02400) return 1;
+    return 0;
+}
+
+static void force_dispatch_charin(agc_t *s)
+{
+    if (s->InIsr) return;
+    if (g_force_dispatches >= MAX_FORCE_DISPATCHES) return;
+
+    // If engine already in CHARIN code, the keypress dispatched normally.
+    if (engine_is_in_charin(s)) {
+        g_keypress_pending = 0;
+        g_keypress_ticks = 0;
+        return;
+    }
+
+    g_keypress_ticks++;
+    if (g_keypress_ticks < FORCE_DISPATCH_TICKS) return;
+
+    // Mark the currently-active slot as completed (priority 077777 = empty).
+    // The cold-boot stuck job at slot 0 (1/ACCSET or PINBALL refresh) gets
+    // dropped — it was never going to terminate cleanly anyway. CHARIN
+    // calls TC ENDOFJOB when done, which calls NUCHANG2 to select next
+    // slot; if none, DUMMYJOB runs, which is fine.
+    s->Erasable[0][0167] = 077777;        // PRIORITY of active slot → empty
+
+    // Set engine registers to start CHARIN immediately.
+    s->Erasable[0][5] = CHARIN_LOC;       // RegZ ← 02077
+    s->Erasable[0][4] = 030 << 10;        // RegFB ← bank 030
+    s->Erasable[0][6] = CHARIN_BANKSET;   // RegBB ← FB=030 SBANK EB=1
+    s->Erasable[0][3] = 1;                // RegEB ← 1
+    s->OutputChannel7 |= 0100;            // SUPERBANK bit
+    s->Erasable[0][067] = 077777;         // NEWJOB cleared
+
+    // Clear interrupt state so the engine doesn't bounce back into KEYRUPT1.
+    s->InIsr = 0;
+    s->AllowInterrupt = 1;
+    s->InterruptRequests[5] = 0;          // KEYRUPT1 acknowledged
+
+    g_keypress_pending = 0;
+    g_keypress_ticks = 0;
+    g_force_dispatches++;
+    int ch15_val = s->InputChannel[015] & 077777;
+    ESP_LOGI(PSTUB_TAG, "force_dispatch_charin #%d fired (ch15=%05o dec=%d Z=%05o FB=%05o)",
+             g_force_dispatches, ch15_val, ch15_val,
+             s->Erasable[0][5] & 077777,
+             s->Erasable[0][4] & 077777);
 }
 
 void peripheral_stub_tick(agc_t *state)
@@ -609,6 +702,11 @@ void peripheral_stub_tick(agc_t *state)
     rescue_stuck_job(state);
     rescue_wakestal_sleeper(state);
     dispatch_pending_charin(state);
+    // Aggressive fallback: if a keypress was queued and the engine has
+    // not reached CHARIN code, force-dispatch it directly. This works
+    // around the broken NOVAC slot allocation that prevents CHARIN
+    // from ever running normally during cold boot.
+    if (g_keypress_pending) force_dispatch_charin(state);
 
     // Generic "active job stuck at same Z" rescue. Hardware monitor
     // shows the engine bouncing forever in tight loops with an active

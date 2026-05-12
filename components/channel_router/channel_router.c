@@ -418,6 +418,11 @@ void channel_router_post_key(int code)
     ESP_LOGI(TAG, "post: code=%02o queued, head=%u tail=%u",
              code & 0x1F, (unsigned)head_after, (unsigned)tail_after);
 #endif
+    // Arm CHARIN force-dispatch in peripheral_stub. If the engine fails
+    // to reach CHARIN within ~50ms, peripheral_stub_tick will manually
+    // set up the engine to execute CHARIN — works around the slot-
+    // allocation bug that prevents normal dispatch during cold boot.
+    if (!dropped) peripheral_stub_on_keypress_posted((uint8_t)(code & 0x1F));
 }
 
 uint64_t channel_router_snapshot(dsky_state_t *out)
