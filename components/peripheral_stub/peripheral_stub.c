@@ -552,31 +552,38 @@ void peripheral_stub_tick(agc_t *state)
     rescue_wakestal_sleeper(state);
     dispatch_pending_charin(state);
 
-    // CHARIN-stuck-in-interpretive-GOTO rescue. Hardware monitor shows
-    // the engine reaches active=p030110 (CHARIN) but then bounces forever
-    // at Z in the 06044-06700 range — that's INTERPRETER.agc's
-    // GOTOERS/POLISH=0 indirection loop (same deadlock memory describes
-    // for 1/ACCSET on host, just with CHARIN as the victim). The
-    // standard rescue_stuck_job trigger doesn't match because newjob=0
-    // (no pending swap). Trigger here on the explicit Z signature:
-    //   Z ∈ [06040, 06700] for K consecutive ticks AND active job has
-    //   stuck LOC (LOC ∈ [002600, 002700] not advancing meaningfully).
-    static int g_gotoers_count = 0;
-    static int g_gotoers_rescues = 0;
+    // Generic "active job stuck at same Z" rescue. Hardware monitor
+    // shows the engine bouncing forever in tight loops with an active
+    // job (typically CHARIN at p030110) and no NEWJOB swap pending —
+    // so neither rescue_stuck_job (needs NEWJOB) nor the specific
+    // dispatch_pending_charin (needs 1/ACCSET active) ever fire.
+    //
+    // Trigger: same Z address (within a small tolerance) for K
+    // consecutive ChannelRoutine ticks AND active slot is occupied.
+    // K=4 ticks ≈ 3 sec on ESP32 ≈ 32K simulated cycles. A healthy
+    // engine moves Z hundreds-of-thousands of distinct addresses per
+    // second; if it's pinned to ONE Z for 3 sec, it's stuck.
+    static int g_stuck_z_count = 0;
+    static int g_stuck_z_last = 0;
+    static int g_stuck_z_rescues = 0;
     int z_check = state->Erasable[0][5] & 077777;
     int prio_check = state->Erasable[0][0167] & 077777;
-    int in_gotoers = (z_check >= 06040 && z_check <= 06700);
     int job_active = (prio_check != 077777 && prio_check != 0);
-    if (in_gotoers && job_active) {
-        g_gotoers_count++;
-        if (g_gotoers_count >= 8 && g_gotoers_rescues < 4) {
+    // Compare with a 16-address tolerance: tight interpretive loops
+    // bounce a few sequential Z values, but stay in a small range.
+    int z_delta = z_check - g_stuck_z_last;
+    if (z_delta < 0) z_delta = -z_delta;
+    if (job_active && z_delta < 16) {
+        g_stuck_z_count++;
+        if (g_stuck_z_count >= 4 && g_stuck_z_rescues < 8) {
             simulate_gojam(state);
-            ESP_LOGI(PSTUB_TAG, "rescue_gotoers #%d fired (Z=%05o prio=%06o)",
-                     g_gotoers_rescues + 1, z_check, prio_check);
-            g_gotoers_rescues++;
-            g_gotoers_count = 0;
+            ESP_LOGI(PSTUB_TAG, "rescue_stuck_z #%d fired (Z=%05o prio=%06o)",
+                     g_stuck_z_rescues + 1, z_check, prio_check);
+            g_stuck_z_rescues++;
+            g_stuck_z_count = 0;
         }
     } else {
-        g_gotoers_count = 0;
+        g_stuck_z_count = 0;
     }
+    g_stuck_z_last = z_check;
 }
