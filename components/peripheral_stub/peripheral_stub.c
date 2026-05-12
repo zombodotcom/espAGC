@@ -625,6 +625,25 @@ static void force_dispatch_charin(agc_t *s)
         return;
     }
 
+    // CRITICAL: only force-dispatch when engine is stuck in cold-boot loop.
+    // If executive is idle (active slot priority == 077777) OR running a
+    // legitimate verb-in-progress (e.g. V37 waiting for noun, priority
+    // !=030110 and !=000110), trust KEYRUPT1 to dispatch normally.
+    // Force-dispatching during V37's noun-wait blows away its state and
+    // restarts CHARIN from scratch — user types "01E" but it gets treated
+    // as a fresh sequence and the noun never lands.
+    int active_prio = s->Erasable[0][0167] & 077777;
+    int cold_boot_stuck = (active_prio == 0030110 ||  // 1/ACCSET
+                          active_prio == 0027110 ||  // PINBALL stuck
+                          active_prio == 0000110);   // broken CHARIN slot
+    if (!cold_boot_stuck) {
+        // Engine is in normal scheduling — keypress should reach CHARIN
+        // through KEYRUPT1+NOVAC normally. Don't intervene.
+        g_keypress_pending = 0;
+        g_keypress_ticks = 0;
+        return;
+    }
+
     g_keypress_ticks++;
     if (g_keypress_ticks < FORCE_DISPATCH_TICKS) return;
 
