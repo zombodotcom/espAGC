@@ -45,4 +45,19 @@ if [ $fails -gt 0 ]; then
     echo "VERIFICATION FAILED: $fails must-match channel(s) diverged"
     exit 1
 fi
-echo "VERIFICATION OK: must-match channels (ch$MUST_MATCH) align with reference"
+
+# Required-value check: reference emits ch010 = 55265 (PRG = 00) after the
+# second V37E00E. Our build must do the same to call V37E00E "working".
+# Detect-but-don't-fail at the channel-set level so we know exactly what's
+# missing in plain English.
+if grep -qF "OUT ch010 = 55265" /tmp/_ref.log; then
+    if grep -qF "OUT ch010 = 55265" /tmp/_local.log; then
+        echo "VERIFICATION OK: PRG=00 (ch010=55265) emitted, channel sets align"
+    else
+        echo "PARTIAL OK: channel-value subsets align, but PRG=00 (ch010=55265) missing"
+        echo "  → V37E00E sequence does not complete to P00 in our build."
+        exit 2
+    fi
+else
+    echo "VERIFICATION OK: must-match channels (ch$MUST_MATCH) align with reference"
+fi

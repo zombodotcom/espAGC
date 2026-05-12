@@ -16,37 +16,42 @@
 
 static void section(const char *label) { printf("%s\n", label); fflush(stdout); }
 
+// Matches tests/host/golden/ref_V36_V37E00E_double_to_PRG00.log
+// captured from reference yaAGC. The reference produces PRG=00
+// (ch010 = 55265) after the SECOND V37E00E. Our build should match.
+static void key(int code, int step_cycles) {
+    harness_post_key(code); harness_step(step_cycles);
+}
+
 int main(void)
 {
     harness_boot();
-    // 0.5s cold-boot settle
+    section("--- ini ---");
     harness_step(500000);
-
-    section("--- sending LM_Sim ini values ---");
-    // (peripheral_stub_init already wrote the channel baselines)
-
     harness_step(2000000);
-    section("--- cold-boot settle (2s) ---");
 
-    section("--- RSET ---");
-    harness_post_key(15); harness_step(500000);
+    section("--- R ---");
+    key(15, 500000);
 
-    section("--- V35E (lamp test) ---");
-    harness_post_key(17); harness_step(100000);  // V
-    harness_post_key(3);  harness_step(100000);
-    harness_post_key(5);  harness_step(100000);
-    harness_post_key(28); harness_step(3000000); // E + settle
+    section("--- V36E ---");
+    key(17, 100000); key(3, 100000); key(6, 100000);
+    key(28, 3000000);
 
     section("--- V37E ---");
-    harness_post_key(17); harness_step(100000);
-    harness_post_key(3);  harness_step(100000);
-    harness_post_key(7);  harness_step(100000);
-    harness_post_key(28); harness_step(1000000);
+    key(17, 100000); key(3, 100000); key(7, 100000);
+    key(28, 1000000);
 
     section("--- 00E ---");
-    harness_post_key(16); harness_step(100000);
-    harness_post_key(16); harness_step(100000);
-    harness_post_key(28); harness_step(5000000);
+    key(16, 100000); key(16, 100000);
+    key(28, 3000000);
+
+    section("--- V37E ---");
+    key(17, 100000); key(3, 100000); key(7, 100000);
+    key(28, 5000000);
+
+    section("--- 00E ---");
+    key(16, 100000); key(16, 100000);
+    key(28, 15000000);
 
     section("--- DONE ---");
     return 0;

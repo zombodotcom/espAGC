@@ -105,22 +105,17 @@ def main():
         send_key(s, k); time.sleep(0.1)
     time.sleep(3.0)
 
-    # V36E (REQUEST FRESH START)
-    log.write("--- V36E (FRESH START) ---\n")
-    for k in 'V36E':
-        send_key(s, k); time.sleep(0.1)
-    time.sleep(3.0)
+    # Read sequence from argv or default
+    seq = sys.argv[1] if len(sys.argv) > 1 else "R V35E V37E 00E"
 
-    # V37E00E retry loop — tutorial says "repeat a couple of times"
-    for attempt in range(6):
-        log.write(f"--- attempt {attempt+1}: V37E00E ---\n")
-        for k in 'V37E':
+    for tok in seq.split():
+        log.write(f"--- {tok} ---\n")
+        log.flush()
+        for k in tok:
             send_key(s, k); time.sleep(0.1)
-        time.sleep(1.0)
-        for k in '00E':
-            send_key(s, k); time.sleep(0.1)
-        time.sleep(4.0)
+        time.sleep(3.0)
 
+    time.sleep(2.0)
     log.write("--- DONE ---\n")
     s.close()
 
