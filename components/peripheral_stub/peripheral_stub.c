@@ -548,9 +548,16 @@ void peripheral_stub_tick(agc_t *state)
                  g_diag_tick, z, newjob, active_prio, active_loc, wakestal_slot);
     }
 
-    rescue_stuck_job(state);
-    rescue_wakestal_sleeper(state);
-    dispatch_pending_charin(state);
+    // EXPERIMENT: all rescues disabled. Hardware monitor shows the
+    // rescues fire 8 times but each GOJAM latches RestartLight+
+    // GeneratedWarning, accumulating bad alarm state. The engine
+    // never converges to clean cold-boot — just bounces stuck-state →
+    // GOJAM → stuck-state. Try letting Luminary's own RESTART logic
+    // recover naturally without our interference.
+    (void)rescue_stuck_job; (void)state;
+    (void)rescue_wakestal_sleeper;
+    (void)dispatch_pending_charin;
+    return;
 
     // Generic "active job stuck at same Z" rescue. Hardware monitor
     // shows the engine bouncing forever in tight loops with an active

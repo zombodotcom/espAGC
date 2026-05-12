@@ -8,26 +8,33 @@ The emulator core is yaAGC. License is **GPL v2** (carries through from yaAGC).
 
 | Layer | Status | Notes |
 |---|---|---|
-| Layer 1 — pure-logic host tests | **4/4 PASS** | ROM loader, engine boot, channel-10 DSKY emit, keypad hit-test (~1 s) |
-| Layer 2a — engine + real channel_router | **11/11 PASS** | Boot alarm dump, P00 select, lamp test, RSET clears, Apollo 11 transcript replay, auto-RSET, IMODES, FAILREG, idle quiet, executive state, CHARIN dispatch |
+| Layer 1 — pure-logic host tests | **4/4 PASS** | ROM loader, engine boot, channel-10 DSKY emit, keypad hit-test |
+| Layer 2a — engine + real channel_router | **12/12 PASS** | Boot alarm dump, P00 select, lamp test, RSET clears, Apollo 11 transcript replay, auto-RSET, IMODES, FAILREG, idle quiet, executive state, CHARIN dispatch |
 | Layer 2b — renderer pixel tests | **2/2 PASS** | Blank frame FNV-1a hash, region assertions for lit PROG/VERB/NOUN cells |
-| `yaagc_ref` | **builds, runs** | Reference harness using upstream `agc_engine_init.c` directly — links `NullAPI.c` to bypass the socket layer. Run `./yaagc_ref.exe` to see vanilla yaAGC's cold-boot behavior for comparison. |
-| Layer 3 — QEMU | **deferred** | No QEMU support for ESP32-C5/WROOM in any released QEMU; covered by Layer 2 instead |
-| Layer 4 — hardware | **boots, engine runs** | Firmware brings up the ST7789 panel, loads Luminary099, falls back to SoftAP `espAGC` if no WiFi creds configured. Serial monitor confirms boot succeeds end-to-end on commit `ac94ec3`: auto-RSET fires at tick 16, ch011 toggles (COMP ACTY blinking), ch010 row-by-row blanking sweep runs, executive dispatches jobs (ca=1 in snap logs). Connect to AP `espAGC` and browse `http://192.168.4.1/` to send V35E from the web UI's canned sequences. |
+| `verify-ref` (vs WSL ground truth) | **PARTIAL OK ⚠️** | `make verify-ref` runs `test_ref_compare` with async pthread real-time pacing, diffs against `golden/ref_V36_V37E00E_double_to_PRG00.log` captured from WSL yaAGC. Channel-value subsets (ch005/006/010/013) align with reference; PRG=00 (ch010=55265) is missing — V37's NEWMODE transition doesn't complete in our cycle-driven harness. Exit code 2 = honest "not equivalent yet". |
+| `yaagc_ref`, `test_ref_v37_slots` | **diagnostic** | Reference harnesses linking upstream `agc_engine_init.c` directly. `test_ref_v37_slots` proves cycle-driven V37+ENTR crash is upstream-yaAGC behavior, not our integration. |
+| Layer 3 — QEMU | **deferred** | No QEMU support for ESP32-WROOM in any released QEMU; covered by Layer 2 instead |
+| Layer 4 — hardware | **boots, engine runs, display blank ⚠️** | Firmware boots reliably on the CYD board: ST7789 up, ROM loaded, WiFi STA or SoftAP, agc_task pinned to APP_CPU (core 1) with 10ms periodic batches, ui_task on PRO_CPU (core 0). NO watchdog trips. Cold-boot trips NW alarm, FAILREG latches 01107. Engine runs at ~95 kHz simulated. The current peripheral_stub rescues that work on host **do not unblock the display on hardware** — even after 8 rescue fires the engine bounces between stuck states without ever lighting digit rows. V35E and V37E00E sequences are received by CHARIN but never produce ch010 row=10/11/9 non-zero emissions. See [HANDOFF.md](HANDOFF.md) for the full investigation log and next-step proposals. |
 
 DSKY output renders as a 320×240 framebuffer on the ST7789 panel — status panel, register window, and an on-screen 19-key keypad backed by the XPT2046 resistive touchscreen. No LVGL — direct framebuffer in 80-row strips, three passes per frame.
 
-## How V35E works — the cold-boot recovery
+## How V35E works — the cold-boot recovery (host build)
 
-Cold-boot Luminary099 on yaAGC has a documented deadlock without a `--resume` core-dump file or a connected LM_Simulator socket peer. 1/ACCSET (PRIO=27110, allocated by DAPIDLER's first T5RUPT) executes interpretive code that gets caught in `INTERPRETER.agc:681` GOTO indirection — POLISH=0 dereferencing zero scratch storage indefinitely. Block II AGC is non-preemptive, so CHARIN (allocated on keypress) can never take CPU. Vanilla yaAGC has the same problem (verified via `yaagc_ref` — see Reference harness section).
+Cold-boot Luminary099 on yaAGC has a documented deadlock without a `--resume` core-dump file or a connected LM_Simulator socket peer. 1/ACCSET (PRIO=27110, allocated by DAPIDLER's first T5RUPT) executes interpretive code that gets caught in `INTERPRETER.agc:681` GOTO indirection — POLISH=0 dereferencing zero scratch storage indefinitely. Block II AGC is non-preemptive, so CHARIN (allocated on keypress) can never take CPU. Vanilla yaAGC has the same problem (verified via `yaagc_ref` and `test_ref_v37_slots` — see [HANDOFF.md](HANDOFF.md)).
 
-`peripheral_stub_tick` (in `components/peripheral_stub/peripheral_stub.c`) provides two-stage recovery:
+`peripheral_stub_tick` (in `components/peripheral_stub/peripheral_stub.c`) provides multi-stage recovery on the **host build**:
 
-1. **GOJAM-rescue.** When NEWJOB stays the same across consecutive ticks (executive wants to swap but can't), trigger a simulated GOJAM matching `agc_engine.c:2246-2298`. After the first rescue, RCSFLAGS bit 13 is kept asserted so DAPIDLER's CHECKUP path doesn't re-NOVAC 1/ACCSET.
+1. **GOJAM-rescue.** When NEWJOB stays the same across consecutive ticks (executive wants to swap but can't), trigger a simulated GOJAM matching `agc_engine.c:2246-2298`.
 
-2. **CHARIN dispatch injection.** Each tick, scan the 7 inactive job slots for one matching CHARIN's signature (PRIO=30110, LOC=02077, BANKSET=060101). If found and the active slot is stale (same priority or lower), manually copy the CHARIN slot's state into the active set (a software CHANG2), and set RegZ/FBANK/EBANK/SBANK so the engine starts executing CHARIN's first instruction immediately. This bypasses the cooperative-scheduling deadlock that real LM_Simulator avoids via continuous socket-injected counter pulses.
+2. **CHARIN dispatch injection.** Each tick, scan the 7 inactive job slots for one matching CHARIN's signature (PRIO=30110, LOC=02077, BANKSET=060101). If found and the active slot is the stuck 1/ACCSET (027110), manually copy the CHARIN slot's state into the active set (software CHANG2), and set RegZ/FBANK/EBANK/SBANK so the engine starts executing CHARIN's first instruction.
 
-Result: keypresses reach CHARIN, CHARIN updates VERBREG/NOUNREG/DSPCOUNT and writes ch010 row 10 (VERB digits). V35 LAMP TEST runs the full sequence (all digits → "8", status lamps lit, 5-second pause, lamps off).
+3. **Stuck-Z rescue.** When the active job pins Z within a 16-address window for 4+ ChannelRoutine ticks, force GOJAM. Generic catch-all for interpretive-loop deadlocks.
+
+4. **WAKESTAL rescue.** When a slot parks at INTSTALL's CADR (027414/027415) for 4+ ticks, force GOJAM. Handles V37's INTSTALL JOBSLEEP path.
+
+Result on host: V35 LAMP TEST runs the full sequence — `make run` → ALL PASS confirms via `test_v35e_full`.
+
+**ESP32 hardware status: rescues fire but display still stays blank.** Cold-boot trips NW alarm (FAILREG[0]=01107), engine cycles between stuck states until alarms settle and slot 0 ends up empty. See [HANDOFF.md](HANDOFF.md) for current debugging and next steps. The dual-core layout (agc_task on APP_CPU, ui_task on PRO_CPU) is in place but the display work isn't done yet.
 
 ## Boot behavior — the PROG ALARM caveat
 
@@ -116,9 +123,9 @@ Hold the boot button at reset to switch ROM to Comanche055.
 
 | Sequence | Type | What you'll see |
 |---|---|---|
-| **V35E** (lamp test) | works ✅ | After V then 3 then 5: VERB digits show "35". After E: all six digit pairs show "88" and every status lamp lights for ~5 sec, then turns off |
-| **R** (RSET) | works ✅ | Clears RESTART lamp |
-| **V37E00E** (select P00) | partial ⚠️ | VRB shows "37" after V37E. NUN shows "00" after typing the program-number digits. After the final E, NUN clears (program-change executes). PROG digits don't show "00" yet — MMDSPLAY at GOPROG3 should display MODREG via SETUPDSP→DSPMMJB→DSPDECVN, but the long V37→POOH→IBNKCALL chain doesn't complete in our test window. Diagnostics in `tests/host/test_v37e00e_full.c` and `test_v37_slots.c` |
+| **V35E** (lamp test) | host ✅ / hardware ⚠️ | **Host**: `test_v35e_full` shows VRB=35 after digits then [8,8][8,8][8,8] after E (all digits + lamps). **Hardware**: keypress reaches CHARIN but DSKY display stays blank — see [HANDOFF.md](HANDOFF.md) |
+| **R** (RSET) | host ✅ | Clears RESTART lamp on host. RestartLight stays lit on hardware due to repeated cold-boot NW alarms |
+| **V37E00E** (select P00) | host partial ⚠️ | `verify-ref` exits 2 (PARTIAL OK): channel-value subsets match WSL ground truth but PRG=00 (ch010=55265) doesn't emit. V37's NEWMODE/MMCHANG transition crashes the engine on the second ENTR (slot saves with wrong BANKSET). `test_ref_v37_slots` confirms this is upstream-yaAGC cycle-driven-mode behavior, not our integration. Hardware doesn't reach PRG=00 either. |
 
 V35E is the headline demo — it exercises CHARIN dispatch, lamp test verb 35, ch010 row-by-row digit + lamp output, and the full DSKY render pipeline end-to-end.
 
