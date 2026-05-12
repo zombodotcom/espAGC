@@ -316,10 +316,172 @@ void peripheral_stub_step(agc_t *state, uint32_t dt_us)
     push_cdu_delta(state, CDUZ_COUNTER, &g_att_z_mdeg, &g_pimu_z_mdeg);
 }
 
+// Stuck-job recovery via simulated GOJAM. Cold-boot Luminary's
+// 1/ACCSET (PRIO27 + offset 110 = priority 027110, allocated by
+// DAPIDLER) enters interpretive code that gets caught in
+// INTERPRETER.agc:681 GOTO indirection with POLISH=0 reading
+// Erasable[4][044]=0 indefinitely. Block II AGC is non-preemptive
+// and the GOTOERS loop doesn't reach DANZIG (where NEWJOB is
+// checked), so the executive can never swap CHARIN in.
+//
+// Real Apollo had this never happen because the crew's pre-launch
+// PAD LOAD set MASS/DAP coefficients to values that let 1/ACCS
+// converge cleanly. Without those values, 1/ACCS's interpretive
+// computation degenerates. LM_Simulator over a socket would also
+// keep the engine fed via ParseIoPacket / UnprogrammedIncrement.
+//
+// Recovery: when NEWJOB indicates a higher-priority job is waiting
+// across multiple consecutive ticks (current job never yields),
+// simulate a hardware GOJAM — the same recovery yaAGC does on alarm
+// trips (agc_engine.c:2246-2295). GOJAM sets Z=04000, clears
+// interrupt state, and runs FRESH_START → DORSTART, which restarts
+// the system from a known-clean state. The pending CHARIN job in
+// slot 1 is restored by DORSTART's RESTART logic (slot CADRs are
+// preserved across software restarts), so the keypress that
+// triggered the original CHARIN allocation gets processed normally.
+// Rescue can fire multiple times. Each GOJAM gets the engine past
+// one round of 1/ACCSET deadlock, but since FRESH_START re-clears
+// RCSFLAGS bit 13, DAPIDLER will re-NOVAC 1/ACCSET on its next
+// T5RUPT. The rescue fires again on the next stuck detection. Cap at
+// MAX_RESCUES to avoid runaway GOJAM if something else is broken.
+#define STUCK_THRESHOLD   2
+// One-shot rescue at boot: get past the initial 1/ACCSET deadlock.
+// After that, normal Luminary dispatch handles things — additional
+// rescues risk killing legitimate verb-execution flows that hold
+// NEWJOB while waiting for user input (V37 REQMM, etc.).
+#define MAX_RESCUES       1
+static int      g_last_newjob   = 0;
+static int      g_stuck_count   = 0;
+static int      g_rescue_count  = 0;
+
+static void simulate_gojam(agc_t *s)
+{
+    // Mirror agc_engine.c GOJAM (line 2246-2298) exactly.
+    s->ExtraDelay += 2;                      // GOJAM + TC 4000 timing
+    s->Erasable[0][2] = s->Erasable[0][5];   // RegQ <- old Z
+    s->Erasable[0][5] = 04000;               // RegZ -> FRESH_START
+    s->InIsr = 0;
+    s->AllowInterrupt = 1;
+    s->ParityFail = 0;
+    s->Trap31A = s->Trap31B = s->Trap32 = 0;
+    for (int i = 1; i <= NUM_INTERRUPT_TYPES; i++) s->InterruptRequests[i] = 0;
+    s->InputChannel[005] = 0;
+    s->InputChannel[006] = 0;
+    s->InputChannel[010] = 0;
+    s->InputChannel[011] = 0;
+    s->InputChannel[012] = 0;
+    s->InputChannel[013] = 0;
+    s->InputChannel[014] = 0;
+    s->InputChannel[033] |= 002000;          // UPLINK TOO FAST
+    s->InputChannel[034] = 0;
+    s->InputChannel[035] = 0;
+    s->DownruptTimeValid = 0;
+    s->IndexValue = 0;
+    s->ExtraCode = 0;
+    s->SubstituteInstruction = 0;
+    s->PendFlag = 0;
+    s->PendDelay = 0;
+    s->TookBZF = 0;
+    s->TookBZMF = 0;
+    s->RestartLight = 1;
+    s->GeneratedWarning = 1;
+}
+
+static void rescue_stuck_job(agc_t *state)
+{
+    if (g_rescue_count >= MAX_RESCUES) return;
+    int newjob = state->Erasable[0][067] & 077777;
+    int swap_pending = (newjob != 0 && newjob != 077777);
+
+    if (swap_pending && newjob == g_last_newjob) {
+        g_stuck_count++;
+        if (g_stuck_count >= STUCK_THRESHOLD) {
+            simulate_gojam(state);
+            g_stuck_count = 0;
+            g_rescue_count++;
+        }
+    } else {
+        g_stuck_count = 0;
+    }
+    g_last_newjob = newjob;
+}
+
+// Look for an unhandled CHARIN slot (PRIO=30110, LOC=02077,
+// BANKSET=60101). If found, an external keypress allocated CHARIN
+// but the executive can't dispatch it (1/ACCSET blocking, or a
+// stale priority-30 job from an earlier keypress is "active"). Free
+// any blocking active slot, then set up the engine to execute
+// CHARIN's first instruction directly.
+//
+// CHARIN entry per PINBALL_GAME__BUTTONS_AND_LIGHTS.agc:475:
+//   bank 040 (FBANK=030+SBANK), offset 02077, EBANK=1
+// In yaAGC: Z=02077 with FBANK=030 and ch7 bit 6 set selects bank 040.
+#define CHARIN_LOC      02077
+#define CHARIN_BANKSET  060101  /* FBANK=030, SBANK in bit 6, EBANK=1 */
+#define CHARIN_PRIORITY 030110
+
+// 1/ACCSET's signature: PRIO = 027110 (PRIO27 + work area offset 0110).
+// This is the specific deadlock we're rescuing. Don't intervene for any
+// other active job — let Luminary's normal dispatch handle them.
+#define STUCK_1_ACCSET_PRIO 027110
+
+static void dispatch_pending_charin(agc_t *s)
+{
+    if (s->InIsr) return;       // don't disturb interrupt processing
+
+    // Only intervene when the ACTIVE slot is the known-bad 1/ACCSET
+    // (PRIO=027110). Other legitimate running jobs must not be
+    // disturbed — that breaks normal verb-execution flow (e.g., V37
+    // sleeps in INTSTALL waiting for the user to type the program
+    // number; if we kill its slot, the program-change never completes).
+    int active_prio = s->Erasable[0][0167] & 077777;
+    if (active_prio != STUCK_1_ACCSET_PRIO) return;
+
+    // Look for a CHARIN slot (skip slot 0, which is the active set).
+    int charin_slot = -1;
+    for (int slot = 1; slot < 8; slot++) {
+        int base = 0154 + slot * 014;
+        int prio = s->Erasable[0][base + 11] & 077777;
+        int loc  = s->Erasable[0][base + 8]  & 077777;
+        int bset = s->Erasable[0][base + 9]  & 077777;
+        if (prio == CHARIN_PRIORITY && loc == CHARIN_LOC &&
+            bset == CHARIN_BANKSET) {
+            charin_slot = slot;
+            break;
+        }
+    }
+    if (charin_slot < 0) return;
+
+    // Free the stuck 1/ACCSET active slot.
+    s->Erasable[0][0167] = 077777;
+
+    // Manual CHANG2 swap: copy slot N's state to active.
+    int src = 0154 + charin_slot * 014;
+    for (int off = 0; off < 014; off++) {
+        s->Erasable[0][0154 + off] = s->Erasable[0][src + off];
+    }
+    // Free the source slot.
+    for (int off = 0; off < 014; off++) {
+        s->Erasable[0][src + off] = 0;
+    }
+    s->Erasable[0][src + 11] = 077777;
+
+    // Set engine state to start executing CHARIN's first instruction.
+    s->Erasable[0][5] = CHARIN_LOC;           // RegZ
+    s->Erasable[0][4] = 030 << 10;            // RegFB = FBANK 030
+    s->Erasable[0][6] = CHARIN_BANKSET;       // RegBB
+    s->Erasable[0][3] = 1;                    // RegEB = 1
+    s->OutputChannel7 |= 0100;                // superbank bit
+    s->Erasable[0][067] = 077777;             // NEWJOB cleared
+}
+
 void peripheral_stub_tick(agc_t *state)
 {
     if (state == NULL) return;
     // channel_router_on_routine calls us every ~16k engine cycles
     // (~200ms simulated time). Drive one simulator step per tick.
     peripheral_stub_step(state, 200000);
+
+    rescue_stuck_job(state);
+    dispatch_pending_charin(state);
 }
