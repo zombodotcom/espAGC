@@ -279,26 +279,80 @@ void peripheral_stub_step(agc_t *state, uint32_t dt_us)
     g_step_time_us += dt_us;
     g_pulse_phase++;
 
-    // No continuous channel rewrite: canonical lm_simulator.tcl
-    // (Contributed/LM_Simulator/lm_simulator.tcl:591-600) writes
-    // ch16/30/31/32/33 ONCE at startup via write_ini_values(); thereafter
-    // it only writes when peripheral state actually changes (CDU pulses,
-    // IMU events, etc.). peripheral_stub_init() handles the one-shot
-    // startup write. Refreshing every tick prevented Luminary from ever
-    // observing state transitions on these channels — papering over
-    // the cold-boot deadlock that was actually caused by InhibitAlarms=1
-    // (now removed) combined with 12x-too-fast cycle pacing (now fixed).
-    (void)state;
+    // === Full LM_Simulator dynamic_simulation port ===
+    // Models the LM's attitude + IMU + RCS feedback loop that
+    // lm_simulator.tcl runs continuously on Pi/Linux. The AGC needs
+    // to see PCDU/MCDU pulses on its three CDU registers to confirm
+    // the IMU is healthy and to maintain accurate attitude knowledge.
+    // Without these pulses, IMUMON / 1/ACCS / DAP routines lock up
+    // waiting for state they'll never get.
 
-    // No attitude/CDU simulation in this step. WSL reference yaAGC has
-    // no LM_Simulator running for the V37E00E test and still produces
-    // PRG=00 — the CDU pulses and jet integration aren't needed for
-    // the verb-completion path.
-    (void)decode_jets; (void)push_cdu_delta;
-    (void)g_zero_imu;
-    (void)g_att_x_mdeg; (void)g_att_y_mdeg; (void)g_att_z_mdeg;
-    (void)g_pimu_x_mdeg; (void)g_pimu_y_mdeg; (void)g_pimu_z_mdeg;
-    (void)g_rate_x_mdeg_s; (void)g_rate_y_mdeg_s; (void)g_rate_z_mdeg_s;
+    if (g_zero_imu) {
+        // ISS ZERO: hold attitude at 0, push enough -delta pulses to
+        // zero the AGC's CDU counters quickly. lm_simulator.tcl's
+        // zeroIMU does the same. While zero is asserted, no integration.
+        return;
+    }
+
+    // 1) Decode jet commands → net torque per body axis.
+    int nv, nu, np;
+    decode_jets(&nv, &nu, &np);
+
+    // 2) Integrate body rates from jet torques (Euler integration).
+    //    Each jet pair imparts JET_ACCEL_MDEG_PER_S2 mdeg/s².
+    int32_t dt_ms = (int32_t)(dt_us / 1000);
+    if (dt_ms <= 0) dt_ms = 1;
+    // rate += accel * dt; rate is in mdeg/s, accel in mdeg/s², dt in ms.
+    // So delta_rate = accel * (dt_ms / 1000) = (accel * dt_ms) / 1000.
+    g_rate_x_mdeg_s += ((int32_t)nv * JET_ACCEL_MDEG_PER_S2 * dt_ms) / 1000;
+    g_rate_y_mdeg_s += ((int32_t)nu * JET_ACCEL_MDEG_PER_S2 * dt_ms) / 1000;
+    g_rate_z_mdeg_s += ((int32_t)np * JET_ACCEL_MDEG_PER_S2 * dt_ms) / 1000;
+
+    // 3) Add small free-drift to simulate gyro noise / floor torques.
+    //    Real IMU gyros have residual drift of ~0.001-0.01 deg/sec.
+    //    The drift ensures CDU pulses fire even without jet activity,
+    //    keeping IMUMON / 1/ACCS happy. Direction varies by axis.
+    static int drift_phase = 0;
+    drift_phase = (drift_phase + 1) & 7;
+    // 1 mdeg/sec rotational drift on each axis (alternating direction
+    // via phase). Effective pulse rate: 1 mdeg/s / 11 mdeg/pulse = ~0.09
+    // pulses/sec per axis. Combined: ~0.27 pulses/sec, enough to keep
+    // CDU counters changing without overwhelming the engine.
+    int drift_sign = (drift_phase < 4) ? 1 : -1;
+    g_rate_x_mdeg_s += drift_sign * 1;
+    g_rate_y_mdeg_s += drift_sign * 1;
+    g_rate_z_mdeg_s += drift_sign * 1;
+
+    // Clamp rates to ±30 deg/sec to avoid runaway integration.
+    const int32_t RATE_CLAMP = 30 * MDEG_PER_DEG;
+    if (g_rate_x_mdeg_s >  RATE_CLAMP) g_rate_x_mdeg_s =  RATE_CLAMP;
+    if (g_rate_x_mdeg_s < -RATE_CLAMP) g_rate_x_mdeg_s = -RATE_CLAMP;
+    if (g_rate_y_mdeg_s >  RATE_CLAMP) g_rate_y_mdeg_s =  RATE_CLAMP;
+    if (g_rate_y_mdeg_s < -RATE_CLAMP) g_rate_y_mdeg_s = -RATE_CLAMP;
+    if (g_rate_z_mdeg_s >  RATE_CLAMP) g_rate_z_mdeg_s =  RATE_CLAMP;
+    if (g_rate_z_mdeg_s < -RATE_CLAMP) g_rate_z_mdeg_s = -RATE_CLAMP;
+
+    // 4) Integrate stable-member angles from body rates.
+    //    delta_angle = rate * dt. angle in mdeg, rate in mdeg/sec, dt in ms.
+    //    delta = rate * dt_ms / 1000.
+    g_att_x_mdeg += (g_rate_x_mdeg_s * dt_ms) / 1000;
+    g_att_y_mdeg += (g_rate_y_mdeg_s * dt_ms) / 1000;
+    g_att_z_mdeg += (g_rate_z_mdeg_s * dt_ms) / 1000;
+
+    // Wrap angles to [0, 360000).
+    while (g_att_x_mdeg <  0)                  g_att_x_mdeg += MDEG_FULL_CIRCLE;
+    while (g_att_x_mdeg >= MDEG_FULL_CIRCLE)   g_att_x_mdeg -= MDEG_FULL_CIRCLE;
+    while (g_att_y_mdeg <  0)                  g_att_y_mdeg += MDEG_FULL_CIRCLE;
+    while (g_att_y_mdeg >= MDEG_FULL_CIRCLE)   g_att_y_mdeg -= MDEG_FULL_CIRCLE;
+    while (g_att_z_mdeg <  0)                  g_att_z_mdeg += MDEG_FULL_CIRCLE;
+    while (g_att_z_mdeg >= MDEG_FULL_CIRCLE)   g_att_z_mdeg -= MDEG_FULL_CIRCLE;
+
+    // 5) Push CDU pulses to bring AGC's counters up to integrated angles.
+    //    FIRST_CDU = 032 (CDUX); CDUY=033, CDUZ=034. IncType=1 = PCDU,
+    //    IncType=3 = MCDU (per agc_engine.c:1570 UnprogrammedIncrement).
+    push_cdu_delta(state, CDUX_COUNTER, &g_att_x_mdeg, &g_pimu_x_mdeg);
+    push_cdu_delta(state, CDUY_COUNTER, &g_att_y_mdeg, &g_pimu_y_mdeg);
+    push_cdu_delta(state, CDUZ_COUNTER, &g_att_z_mdeg, &g_pimu_z_mdeg);
 }
 
 // Stuck-job recovery via simulated GOJAM. Cold-boot Luminary's
@@ -514,10 +568,12 @@ static void dispatch_pending_charin(agc_t *s)
 void peripheral_stub_tick(agc_t *state)
 {
     if (state == NULL) return;
-    // ChannelRoutine actually fires every 8191 engine cycles (per
-    // agc_engine.c:1944 — `ChannelRoutineCount & 017777`). At ESP32's
-    // ~95 kHz simulated rate that's once per ~86ms wall-clock, ~12 Hz.
-    peripheral_stub_step(state, 8000);
+    // ChannelRoutine fires every 8191 MCT (agc_engine.c:1944 mask
+    // `ChannelRoutineCount & 017777`). One MCT = 1/AGC_PER_SECOND sec
+    // = 1/85333 sec ≈ 11.72 μs of simulated time. So 8191 MCT ≈ 96 ms
+    // of simulated time. Previously this passed 8000 μs (mis-reading
+    // cycle count as μs) which under-integrated attitude by 12x.
+    peripheral_stub_step(state, 96000);
 
     // Periodic diagnostic — dump engine scheduling state. The rescues
     // below trigger on specific newjob / slot-loc / active-prio
