@@ -14,6 +14,23 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _WIN32
+#include <windows.h>
+static inline uint64_t now_us(void) {
+    static LARGE_INTEGER freq = {0};
+    if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
+    LARGE_INTEGER t; QueryPerformanceCounter(&t);
+    return (uint64_t)((t.QuadPart * 1000000ULL) / freq.QuadPart);
+}
+#else
+#include <time.h>
+static inline uint64_t now_us(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000ULL + ts.tv_nsec / 1000;
+}
+#endif
+
 // Pull in the engine state struct so we can read alarm fields.
 // __embedded__ is set on the command line (-D__embedded__).
 #include "yaAGC.h"
@@ -80,6 +97,51 @@ void harness_step(int n_cycles)
 void harness_post_key(int code)
 {
     channel_router_post_key(code);
+}
+
+// Real-time-paced step. Matches yaAGC's SimExecute behavior on Linux:
+// catch up to wall-clock at 1 MHz. Runs cycles in small batches and
+// busy-waits between batches to maintain the target rate.
+//
+// The pacing keeps T3/T4/T5RUPT timer firings at their wall-clock
+// alignment relative to async keypresses arriving from another thread.
+// Back-to-back execution puts firings at deterministic-but-pathological
+// offsets that crash Luminary's bank-switching paths (V37+ENTR → NEWMODE).
+void harness_step_realtime(int n_cycles)
+{
+    if (n_cycles <= 0) return;
+    // Match yaAGC's SimExecute pacing on Linux: times() has 10ms
+    // granularity, so the engine runs ~10240 cycles in a burst when
+    // wall-time has advanced one CLK_TCK tick. We mimic that here.
+    const int batch = 10240;
+    uint64_t t0 = now_us();
+    long elapsed_cycles = 0;
+    while (elapsed_cycles < n_cycles) {
+        int this_batch = batch;
+        if (elapsed_cycles + this_batch > n_cycles)
+            this_batch = n_cycles - (int)elapsed_cycles;
+        if (g_peripheral_tick_interval > 0) {
+            harness_step(this_batch);     // routes peripheral_stub_tick
+        } else {
+            agc_core_step(this_batch);
+        }
+        elapsed_cycles += this_batch;
+        // Target wall-clock for this batch: t0 + elapsed_cycles us
+        uint64_t target = t0 + (uint64_t)elapsed_cycles;
+        uint64_t now = now_us();
+        while (now < target) {
+            int64_t gap = (int64_t)(target - now);
+            if (gap > 1500) {
+#ifdef _WIN32
+                Sleep((DWORD)(gap / 1000));
+#else
+                struct timespec ts = {gap / 1000000, (gap % 1000000) * 1000};
+                nanosleep(&ts, NULL);
+#endif
+            }
+            now = now_us();
+        }
+    }
 }
 
 void harness_snapshot(dsky_state_t *out)

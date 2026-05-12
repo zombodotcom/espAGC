@@ -29,8 +29,18 @@
 
 #include "driver/gpio.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+
+// APP_CPU_NUM / PRO_CPU_NUM are defined by ESP-IDF's soc.h via FreeRTOS,
+// but provide fallback macros in case a future SDK rearranges headers.
+#ifndef APP_CPU_NUM
+#define APP_CPU_NUM 1
+#endif
+#ifndef PRO_CPU_NUM
+#define PRO_CPU_NUM 0
+#endif
 
 static const char *TAG = "app";
 
@@ -46,13 +56,37 @@ static apollo_rom_id_t pick_rom(void)
         : APOLLO_ROM_LUMINARY099;
 }
 
+// AGC engine task, pinned to APP_CPU (core 1). Real-time-paced at the
+// AGC's nominal 1.024 MHz rate via esp_timer_get_time(). Runs in 10ms
+// bursts of ~10240 cycles to match yaAGC's SimExecute behavior on
+// Linux. Pinning to core 1 keeps WiFi/touch/LCD work off this core so
+// engine timing isn't perturbed by their bursts.
 static void agc_task(void *arg)
 {
     (void)arg;
+    const int batch_cycles = 10240;        // ~10ms simulated per batch
+    const int batch_period_us = 10000;     // wall-clock target per batch
+    int64_t next_tick_us = esp_timer_get_time();
     for (;;) {
-        agc_core_step(2000);
-        // Cooperatively yield so other tasks on the same core run.
-        vTaskDelay(1);
+        agc_core_step(batch_cycles);
+        next_tick_us += batch_period_us;
+        int64_t now = esp_timer_get_time();
+        int64_t gap = next_tick_us - now;
+        if (gap > 0) {
+            // Coarse sleep for >1 tick, then yield for the remainder.
+            TickType_t ticks = pdMS_TO_TICKS(gap / 1000);
+            if (ticks > 0) vTaskDelay(ticks);
+            else taskYIELD();
+        } else if (gap < -50000) {
+            // Drifted >50ms behind real-time — reset baseline to avoid
+            // a runaway catch-up loop that would starve the other core.
+            next_tick_us = esp_timer_get_time();
+        } else {
+            // Slightly behind: yield once and re-enter loop without
+            // resetting the baseline, so we catch up over the next few
+            // batches.
+            taskYIELD();
+        }
     }
 }
 
@@ -120,9 +154,14 @@ void app_main(void)
         }
     }
 
-    // ESP32 dual-core; let FreeRTOS distribute across cores by default.
-    xTaskCreate(agc_task, "agc", 6144, NULL, 10, NULL);
-    xTaskCreate(ui_task,  "ui",  6144, NULL,  5, NULL);
+    // ESP32 dual-core: pin AGC engine to APP_CPU (core 1) at high
+    // priority so its real-time pacing isn't perturbed by WiFi/touch
+    // bursts on PRO_CPU (core 0). UI/snapshot work runs on core 0
+    // alongside the radio stack. This mirrors WSL's setup (yaAGC as
+    // one process, peripheral simulators as another process) — except
+    // the "cores" replace the process boundary.
+    xTaskCreatePinnedToCore(agc_task, "agc", 6144, NULL, 10, NULL, APP_CPU_NUM);
+    xTaskCreatePinnedToCore(ui_task,  "ui",  6144, NULL,  5, NULL, PRO_CPU_NUM);
 
     ESP_LOGI(TAG, "espAGC running");
     if (led) led->set_rgb(0x00, 0x40, 0x00);   // dim green = healthy

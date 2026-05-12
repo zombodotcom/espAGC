@@ -78,10 +78,19 @@
 // signals pre-asserted. The fresh-state upstream default is the right
 // starting point; specific bits get cleared by the simulator as the
 // boot sequence advances.
-#define LM_SIM_CH030  037777   // upstream yaAGC default — no signals yet
-#define LM_SIM_CH031  077777   // upstream yaAGC default
-#define LM_SIM_CH032  077777   // upstream yaAGC default
-#define LM_SIM_CH033  077777   // upstream yaAGC default
+// LM_Simulator's actual set_ini_values (from lm_simulator.tcl:566-573
+// and confirmed by ref_capture.py's LM_INI list). These are what WSL
+// reference yaAGC sees AFTER 0.5 sec on default 037777/077777 — and
+// what makes Luminary's cold-boot transition out of 1/ACCSET into a
+// state where V37E00E completes.
+//   ch030 = 036331 → bits 13 (IMU operate), 9 (PIPA freshness), 8 cleared
+//   ch031 = 077777 → stick centered
+//   ch032 = 022777 → PRO not pressed, RHC not commanded
+//   ch033 = 057776 → ZERO OPTICS, no fresh radar, no uplink
+#define LM_SIM_CH030  036331
+#define LM_SIM_CH031  077777
+#define LM_SIM_CH032  022777
+#define LM_SIM_CH033  057776
 
 // Step accounting: tracks total simulated time and pulse-emission cadence.
 // Reset by peripheral_stub_init.

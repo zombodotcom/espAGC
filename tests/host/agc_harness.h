@@ -68,6 +68,14 @@ void harness_failreg(harness_failreg_t *out);
 // Each key advances the engine by `gap_cycles` cycles before the next.
 void harness_type(const char *seq, int gap_cycles);
 
+// Real-time-paced cycle stepper. Runs N cycles at the AGC's nominal
+// 1.024 MHz rate (1 cycle per microsecond, modulo OS sleep granularity).
+// Same logic yaAGC's SimExecute uses on Linux. ~17 sec wall-clock for
+// 17M cycles. Use this for V37E00E-class tests that need real-time
+// alignment of interrupt firings; back-to-back agc_engine() calls hit
+// deterministic-but-bad cycle alignments and miss state transitions.
+void harness_step_realtime(int n_cycles);
+
 #ifdef __cplusplus
 }
 #endif
