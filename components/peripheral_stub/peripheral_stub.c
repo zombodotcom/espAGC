@@ -270,12 +270,12 @@ void peripheral_stub_step(agc_t *state, uint32_t dt_us)
     g_step_time_us += dt_us;
     g_pulse_phase++;
 
-    // Continuous channel feed at lm_simulator.tcl's cadence (every step).
-    // LM_Simulator writes all four of 30/31/32/33 — match.
-    state->InputChannel[030] = LM_SIM_CH030;
-    state->InputChannel[031] = LM_SIM_CH031;
-    state->InputChannel[032] = LM_SIM_CH032;
-    state->InputChannel[033] = LM_SIM_CH033;
+    // No continuous channel rewrite. WSL reference yaAGC with our
+    // Python keypress capture (no LM_Simulator running) produces PRG=00
+    // — and ref_capture.py only writes ch30-33 ONCE at init. Continuous
+    // rewriting was clobbering legitimate AGC-side writes to these
+    // channels and diverging our build's state from reference.
+    // peripheral_stub_init already does the one-shot.
 
     if (g_zero_imu) {
         // ISS ZERO active — AGC commanded the IMU to zero. Don't drive

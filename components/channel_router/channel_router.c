@@ -278,6 +278,24 @@ int channel_router_pump_input(void *agc_state)
     agc_t *state = (agc_t *)agc_state;
     uint8_t code;
     bool have_key = false;
+
+    // Match yaAGC's socket interlace (--interlace=N default is 50, set in
+    // agc_cli.c: `Options.interlace = 50`). yaAGC's SocketAPI ChannelInput
+    // only polls the socket every 50 CPU cycles; in between, keys sit in
+    // the kernel socket buffer. This 50-cycle window means KEYRUPT1 fires
+    // at a non-deterministic-but-bounded cycle offset relative to engine
+    // interrupt state.
+    //
+    // Before this throttle, our pump fired every cycle — KEYRUPT1
+    // always fired at cycle 0 of the next batch. That deterministic
+    // alignment crashed the engine to Z=0 on the second V37+ENTR even
+    // with upstream agc_engine_init.c (verified by test_ref_v37_slots).
+    // WSL reference doesn't crash because its 50-cycle window
+    // randomizes the alignment.
+    static int s_interlace = 0;
+    if (s_interlace > 0) { s_interlace--; return 0; }
+    s_interlace = 50;
+
     taskENTER_CRITICAL(&g_key_mux);
     if (g_key_tail != g_key_head) {
         code = g_key_ring[g_key_tail % KEY_RING_SZ];
