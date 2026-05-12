@@ -345,11 +345,14 @@ void peripheral_stub_step(agc_t *state, uint32_t dt_us)
 // T5RUPT. The rescue fires again on the next stuck detection. Cap at
 // MAX_RESCUES to avoid runaway GOJAM if something else is broken.
 #define STUCK_THRESHOLD   2
-// One-shot rescue at boot: get past the initial 1/ACCSET deadlock.
-// After that, normal Luminary dispatch handles things — additional
-// rescues risk killing legitimate verb-execution flows that hold
-// NEWJOB while waiting for user input (V37 REQMM, etc.).
-#define MAX_RESCUES       1
+// Allow multiple GOJAM rescues. Each fired GOJAM runs the engine's
+// own FRESH_START → DORSTART → SETINFL path, which clears RASFLAG
+// BIT7+BIT14 (FRESH_START.agc SETINFL block) and re-runs the restart
+// phase tables. V37 needs at least one GOJAM AFTER its own INTSTALL
+// sleep to clear the orphan BIT14 set by the cold-boot interpretive
+// caller in bank 23. Trigger is NEWJOB-stuck-across-ticks — fires
+// only when a higher-priority job genuinely can't yield.
+#define MAX_RESCUES       4
 static int      g_last_newjob   = 0;
 static int      g_stuck_count   = 0;
 static int      g_rescue_count  = 0;
@@ -404,6 +407,49 @@ static void rescue_stuck_job(agc_t *state)
         g_stuck_count = 0;
     }
     g_last_newjob = newjob;
+}
+
+// Detect any non-active slot sleeping at WAKESTAL CADR for too many
+// ticks. WAKESTAL = CADR INTSTALL+1 = 027415. A real INTSTALL waiter
+// gets woken by INTWAKE in the integration cycle's completion path.
+// In our build the cold-boot orphan never INTWAKE's, so V37's
+// INTSTALL parks forever. Fire one GOJAM per detected stuck sleeper —
+// SETINFL clears RASFLAG bits and the engine restarts cleanly; the
+// user (or test harness) re-issues V37E00E and it goes through.
+#define WAKESTAL_CADR        027415
+#define WAKESTAL_STUCK_TICKS 4      // ~64k cycles (~60ms sim time)
+#define MAX_WAKESTAL_RESCUES 12
+static int g_wakestal_ticks    = 0;
+static int g_wakestal_rescues  = 0;
+
+static void rescue_wakestal_sleeper(agc_t *s)
+{
+    if (g_wakestal_rescues >= MAX_WAKESTAL_RESCUES) return;
+    if (s->InIsr) return;
+
+    int found = 0;
+    // Scan all 8 slots including slot 0 (active). JOBSLEEP negates the
+    // priority of whatever slot the calling job ran in — that's often
+    // slot 0 (where V37's interpretive CALL INTSTALL lands).
+    for (int slot = 0; slot < 8; slot++) {
+        int base = 0154 + slot * 014;
+        int loc  = s->Erasable[0][base + 8]  & 077777;
+        int prio = s->Erasable[0][base + 11] & 077777;
+        if (prio == 077777) continue;          // empty slot
+        int sleeping = (prio & 040000) != 0;   // bit 14 = negated priority
+        if (sleeping && loc == WAKESTAL_CADR) { found = 1; break; }
+    }
+
+    if (found) {
+        g_wakestal_ticks++;
+        if (g_wakestal_ticks >= WAKESTAL_STUCK_TICKS) {
+            simulate_gojam(s);
+            g_wakestal_ticks = 0;
+            g_wakestal_rescues++;
+        }
+    } else {
+        g_wakestal_ticks = 0;
+    }
 }
 
 // Look for an unhandled CHARIN slot (PRIO=30110, LOC=02077,
@@ -483,5 +529,6 @@ void peripheral_stub_tick(agc_t *state)
     peripheral_stub_step(state, 200000);
 
     rescue_stuck_job(state);
+    rescue_wakestal_sleeper(state);
     dispatch_pending_charin(state);
 }

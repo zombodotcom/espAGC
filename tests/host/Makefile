@@ -59,6 +59,7 @@ LAYER2_TESTS := test_alarm_at_boot test_p00_select test_lamp_test \
                 test_auto_rset_at_boot test_peripheral_stub_clears_imodes \
                 test_failreg_diagnostic test_lm_idle_quiet \
                 test_executive_state test_charin_dispatch
+LAYER2_FAILING_TESTS := test_p00_select_retry
 # yaagc_ref — vanilla yaAGC reference harness. Links upstream's
 # agc_engine_init.c directly (not our agc_init.c) and NullAPI.c (no
 # socket layer). Optional --sim flag interleaves peripheral_stub_step
@@ -86,7 +87,7 @@ RENDER_TESTS := test_render_blank test_render_prog_lit
 
 TESTS := $(LAYER1_TESTS) test_keypad_hit $(LAYER2_TESTS) $(RENDER_TESTS)
 
-.PHONY: all diag run clean $(addprefix run-, $(TESTS))
+.PHONY: all diag run run-failing clean $(addprefix run-, $(TESTS)) $(addprefix run-, $(LAYER2_FAILING_TESTS))
 all: $(addsuffix .exe, $(TESTS))
 diag: $(addsuffix .exe, $(DIAG_TESTS))
 
@@ -108,7 +109,7 @@ test_keypad_hit.exe: test_keypad_hit.c $(DISP_HAL)/dsky_keypad_320x240.c
 # Host Layer-2 tests build with auto-RSET ON. On firmware the same flag
 # lives in sdkconfig (set by Kconfig). channel_router.c uses `#ifdef`,
 # so the symbol must be defined here to match Kconfig=y behavior.
-$(addsuffix .exe, $(LAYER2_TESTS)): %.exe: %.c $(HARNESS_SRCS)
+$(addsuffix .exe, $(LAYER2_TESTS) $(LAYER2_FAILING_TESTS)): %.exe: %.c $(HARNESS_SRCS)
 	$(CC) $(CFLAGS) -DCONFIG_AGC_AUTO_RSET_AT_BOOT=1 $(HARNESS_INC) -o $@ $^ -lm
 
 # Diagnostic tests use the same build rule. Not in `run` target.
@@ -130,6 +131,16 @@ $(addsuffix .exe, $(RENDER_TESTS)): %.exe: %.c $(RENDER_SRCS)
 
 run: $(addprefix run-, $(TESTS))
 	@echo ALL PASS
+
+# Real assertion tests known to FAIL right now. Keep separate from `run`
+# so we don't lie about what works, but exposed via `run-failing` so it's
+# easy to check the actual state. CI builds should run both and the
+# failure mode is documented in tests/host/README.md.
+run-failing: $(addsuffix .exe, $(LAYER2_FAILING_TESTS))
+	@for t in $(LAYER2_FAILING_TESTS); do \
+	    echo "--- $$t (expected to FAIL) ---"; \
+	    ROM=$(ROM) ./$$t.exe || true; \
+	done
 
 run-%: %.exe
 	@echo --- $* ---
