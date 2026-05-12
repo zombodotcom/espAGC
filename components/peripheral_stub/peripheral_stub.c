@@ -32,6 +32,9 @@
 //    alarm is a real fault and should remain visible.
 
 #include "peripheral_stub.h"
+#include "esp_log.h"
+
+static const char *PSTUB_TAG = "pstub";
 
 #define CH030_BASELINE        036377
 #define CH033_BASELINE        077777
@@ -388,6 +391,8 @@ static void rescue_stuck_job(agc_t *state)
         g_stuck_count++;
         if (g_stuck_count >= STUCK_THRESHOLD) {
             simulate_gojam(state);
+            ESP_LOGI(PSTUB_TAG, "rescue_stuck_job #%d fired newjob=%06o",
+                     g_rescue_count + 1, newjob);
             g_stuck_count = 0;
             g_rescue_count++;
         }
@@ -432,6 +437,8 @@ static void rescue_wakestal_sleeper(agc_t *s)
         g_wakestal_ticks++;
         if (g_wakestal_ticks >= WAKESTAL_STUCK_TICKS) {
             simulate_gojam(s);
+            ESP_LOGI(PSTUB_TAG, "rescue_wakestal_sleeper #%d fired",
+                     g_wakestal_rescues + 1);
             g_wakestal_ticks = 0;
             g_wakestal_rescues++;
         }
@@ -507,19 +514,39 @@ static void dispatch_pending_charin(agc_t *s)
     s->Erasable[0][3] = 1;                    // RegEB = 1
     s->OutputChannel7 |= 0100;                // superbank bit
     s->Erasable[0][067] = 077777;             // NEWJOB cleared
+    ESP_LOGI(PSTUB_TAG, "dispatch_pending_charin fired (slot %d)", charin_slot);
 }
 
 void peripheral_stub_tick(agc_t *state)
 {
     if (state == NULL) return;
-    // ChannelRoutine actually fires every ~2000 engine cycles (= 2ms at
-    // the 1 MHz nominal rate), not every 16k as the prior comment claimed.
-    // Passing 200000us (200ms) meant our attitude/CDU simulation
-    // integrated 100x too fast, causing the AGC's DAP to keep firing
-    // jets trying to chase wildly drifting state. That bloated ch005/006
-    // emissions by 6x compared to the WSL reference. dt_us = 2000
-    // matches actual tick cadence.
-    peripheral_stub_step(state, 2000);
+    // ChannelRoutine actually fires every 8191 engine cycles (per
+    // agc_engine.c:1944 — `ChannelRoutineCount & 017777`). At ESP32's
+    // ~95 kHz simulated rate that's once per ~86ms wall-clock, ~12 Hz.
+    peripheral_stub_step(state, 8000);
+
+    // Periodic diagnostic — dump engine scheduling state. The rescues
+    // below trigger on specific newjob / slot-loc / active-prio
+    // conditions; if they never fire, this log tells us what state the
+    // engine is actually IN so we can tune the triggers.
+    static int g_diag_tick = 0;
+    if ((++g_diag_tick % 10) == 0) {   // every 10 calls ≈ 1 sec on ESP32
+        int newjob = state->Erasable[0][067] & 077777;
+        int active_prio = state->Erasable[0][0167] & 077777;
+        int active_loc  = state->Erasable[0][0164] & 077777;
+        int z = state->Erasable[0][5] & 077777;
+        int wakestal_slot = -1;
+        for (int slot = 0; slot < 8; slot++) {
+            int base = 0154 + slot * 014;
+            int loc = state->Erasable[0][base + 8] & 077777;
+            int prio = state->Erasable[0][base + 11] & 077777;
+            if (prio != 077777 && prio != 0 && (loc == 027414 || loc == 027415)) {
+                wakestal_slot = slot; break;
+            }
+        }
+        ESP_LOGI(PSTUB_TAG, "tick%d Z=%05o newjob=%06o active=p%06o@%06o wakestal=%d",
+                 g_diag_tick, z, newjob, active_prio, active_loc, wakestal_slot);
+    }
 
     rescue_stuck_job(state);
     rescue_wakestal_sleeper(state);
