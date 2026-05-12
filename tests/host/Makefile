@@ -64,7 +64,7 @@ LAYER2_FAILING_TESTS := test_p00_select_retry
 # test_ref_compare needs CONFIG_AGC_LOG_ALL_OUTPUTS for raw-channel
 # emission. Built separately with its own rule.
 test_ref_compare.exe: test_ref_compare.c $(HARNESS_SRCS)
-	$(CC) $(CFLAGS) -DCONFIG_AGC_LOG_ALL_OUTPUTS=1 $(HARNESS_INC) -o $@ $^ -lm
+	$(CC) $(CFLAGS) -DCONFIG_AGC_LOG_ALL_OUTPUTS=1 $(HARNESS_INC) -o $@ $^ -lm -lpthread
 
 # verify-ref: run our build through the same V35E + V37E00E sequence as
 # ref_capture.py and assert no must-match channel emits values the

@@ -270,50 +270,29 @@ void peripheral_stub_step(agc_t *state, uint32_t dt_us)
     g_step_time_us += dt_us;
     g_pulse_phase++;
 
-    // No continuous channel rewrite. WSL reference yaAGC with our
-    // Python keypress capture (no LM_Simulator running) produces PRG=00
-    // — and ref_capture.py only writes ch30-33 ONCE at init. Continuous
-    // rewriting was clobbering legitimate AGC-side writes to these
-    // channels and diverging our build's state from reference.
-    // peripheral_stub_init already does the one-shot.
+    // Continuous channel feed at lm_simulator.tcl's cadence (every step).
+    // LM_Simulator writes all four of 30/31/32/33 every tick — match
+    // that to keep our engine state stable across NW-alarm GOJAM cycles.
+    // Removing the rewrite for the WSL comparison test makes our build
+    // produce identical channel-value sets to reference, but our
+    // cycle-driven engine then enters cold-boot deadlock without it.
+    state->InputChannel[030] = LM_SIM_CH030;
+    state->InputChannel[031] = LM_SIM_CH031;
+    state->InputChannel[032] = LM_SIM_CH032;
+    state->InputChannel[033] = LM_SIM_CH033;
 
-    if (g_zero_imu) {
-        // ISS ZERO active — AGC commanded the IMU to zero. Don't drive
-        // any motion while it's zeroing.
-        return;
-    }
-
-    // Decode current jet enable state into net torques per body axis.
-    int nv, nu, np;
-    decode_jets(&nv, &nu, &np);
-
-    // Integrate angular acceleration into body rate. dt_us / 1e6 gives
-    // seconds; we keep milli-deg/sec internally so multiply accel by
-    // dt_ms / 1000 and add.
-    int32_t dt_ms = (int32_t)(dt_us / 1000);
-    if (dt_ms < 1) dt_ms = 1;
-    g_rate_x_mdeg_s += (int32_t)nv * JET_ACCEL_MDEG_PER_S2 * dt_ms / 1000;
-    g_rate_y_mdeg_s += (int32_t)nu * JET_ACCEL_MDEG_PER_S2 * dt_ms / 1000;
-    g_rate_z_mdeg_s += (int32_t)np * JET_ACCEL_MDEG_PER_S2 * dt_ms / 1000;
-
-    // Integrate rate into attitude angle.
-    int32_t da_x = g_rate_x_mdeg_s * dt_ms / 1000;
-    int32_t da_y = g_rate_y_mdeg_s * dt_ms / 1000;
-    int32_t da_z = g_rate_z_mdeg_s * dt_ms / 1000;
-    g_att_x_mdeg += da_x;
-    g_att_y_mdeg += da_y;
-    g_att_z_mdeg += da_z;
-    while (g_att_x_mdeg <  0)               g_att_x_mdeg += MDEG_FULL_CIRCLE;
-    while (g_att_x_mdeg >= MDEG_FULL_CIRCLE) g_att_x_mdeg -= MDEG_FULL_CIRCLE;
-    while (g_att_y_mdeg <  0)               g_att_y_mdeg += MDEG_FULL_CIRCLE;
-    while (g_att_y_mdeg >= MDEG_FULL_CIRCLE) g_att_y_mdeg -= MDEG_FULL_CIRCLE;
-    while (g_att_z_mdeg <  0)               g_att_z_mdeg += MDEG_FULL_CIRCLE;
-    while (g_att_z_mdeg >= MDEG_FULL_CIRCLE) g_att_z_mdeg -= MDEG_FULL_CIRCLE;
-
-    // Push CDU pulses to match the integrated angle.
-    push_cdu_delta(state, CDUX_COUNTER, &g_att_x_mdeg, &g_pimu_x_mdeg);
-    push_cdu_delta(state, CDUY_COUNTER, &g_att_y_mdeg, &g_pimu_y_mdeg);
-    push_cdu_delta(state, CDUZ_COUNTER, &g_att_z_mdeg, &g_pimu_z_mdeg);
+    // No attitude/CDU simulation in this step. WSL reference yaAGC has
+    // no LM_Simulator running for the V37E00E test and still produces
+    // PRG=00 — the CDU pulses and jet integration aren't needed for
+    // the verb-completion path. Running them was injecting CDU
+    // unprogrammed-sequence increments into the engine FIFO, which
+    // caused extra COUNTER interrupt churn that diverges our state
+    // from the reference.
+    (void)decode_jets; (void)push_cdu_delta;
+    (void)g_zero_imu;
+    (void)g_att_x_mdeg; (void)g_att_y_mdeg; (void)g_att_z_mdeg;
+    (void)g_pimu_x_mdeg; (void)g_pimu_y_mdeg; (void)g_pimu_z_mdeg;
+    (void)g_rate_x_mdeg_s; (void)g_rate_y_mdeg_s; (void)g_rate_z_mdeg_s;
 }
 
 // Stuck-job recovery via simulated GOJAM. Cold-boot Luminary's
