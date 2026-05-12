@@ -23,6 +23,12 @@ static void key(int code, int step_cycles) {
     harness_post_key(code); harness_step(step_cycles);
 }
 
+// Match ref_capture.py wall-clock pacing at the 1 MHz nominal rate
+// yaAGC runs in WSL: 0.1 sec between keys (=100K cycles), 3 sec post-ENTR
+// settle (=3M cycles).
+#define INTRA_KEY_CYCLES  100000
+#define POST_ENTR_CYCLES  3000000
+
 int main(void)
 {
     harness_boot();
@@ -31,27 +37,29 @@ int main(void)
     harness_step(2000000);
 
     section("--- R ---");
-    key(15, 500000);
+    key(15, INTRA_KEY_CYCLES);
+    harness_step(POST_ENTR_CYCLES);
 
     section("--- V36E ---");
-    key(17, 100000); key(3, 100000); key(6, 100000);
-    key(28, 3000000);
+    key(17, INTRA_KEY_CYCLES); key(3, INTRA_KEY_CYCLES); key(6, INTRA_KEY_CYCLES);
+    key(28, POST_ENTR_CYCLES);
 
     section("--- V37E ---");
-    key(17, 100000); key(3, 100000); key(7, 100000);
-    key(28, 1000000);
+    key(17, INTRA_KEY_CYCLES); key(3, INTRA_KEY_CYCLES); key(7, INTRA_KEY_CYCLES);
+    key(28, POST_ENTR_CYCLES);
 
     section("--- 00E ---");
-    key(16, 100000); key(16, 100000);
-    key(28, 3000000);
+    key(16, INTRA_KEY_CYCLES); key(16, INTRA_KEY_CYCLES);
+    key(28, POST_ENTR_CYCLES);
 
     section("--- V37E ---");
-    key(17, 100000); key(3, 100000); key(7, 100000);
-    key(28, 5000000);
+    key(17, INTRA_KEY_CYCLES); key(3, INTRA_KEY_CYCLES); key(7, INTRA_KEY_CYCLES);
+    key(28, POST_ENTR_CYCLES);
 
     section("--- 00E ---");
-    key(16, 100000); key(16, 100000);
-    key(28, 15000000);
+    key(16, INTRA_KEY_CYCLES); key(16, INTRA_KEY_CYCLES);
+    key(28, POST_ENTR_CYCLES);
+    harness_step(2000000);  // ref_capture.py post-DONE 2s settle
 
     section("--- DONE ---");
     return 0;

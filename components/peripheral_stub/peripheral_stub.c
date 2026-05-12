@@ -524,9 +524,14 @@ static void dispatch_pending_charin(agc_t *s)
 void peripheral_stub_tick(agc_t *state)
 {
     if (state == NULL) return;
-    // channel_router_on_routine calls us every ~16k engine cycles
-    // (~200ms simulated time). Drive one simulator step per tick.
-    peripheral_stub_step(state, 200000);
+    // ChannelRoutine actually fires every ~2000 engine cycles (= 2ms at
+    // the 1 MHz nominal rate), not every 16k as the prior comment claimed.
+    // Passing 200000us (200ms) meant our attitude/CDU simulation
+    // integrated 100x too fast, causing the AGC's DAP to keep firing
+    // jets trying to chase wildly drifting state. That bloated ch005/006
+    // emissions by 6x compared to the WSL reference. dt_us = 2000
+    // matches actual tick cadence.
+    peripheral_stub_step(state, 2000);
 
     rescue_stuck_job(state);
     rescue_wakestal_sleeper(state);
