@@ -56,37 +56,26 @@ static apollo_rom_id_t pick_rom(void)
         : APOLLO_ROM_LUMINARY099;
 }
 
-// AGC engine task, pinned to APP_CPU (core 1). Real-time-paced at the
-// AGC's nominal 1.024 MHz rate via esp_timer_get_time(). Runs in 10ms
-// bursts of ~10240 cycles to match yaAGC's SimExecute behavior on
-// Linux. Pinning to core 1 keeps WiFi/touch/LCD work off this core so
-// engine timing isn't perturbed by their bursts.
+// AGC engine task, pinned to APP_CPU (core 1). The ESP32's
+// interpreted-C agc_engine isn't fast enough to hit AGC's nominal
+// 1.024 MHz simulated rate — measurement shows ~200-300 kHz on
+// 160 MHz ESP32. vTaskDelayUntil's drift-corrected pacing degenerates
+// to a tight loop when each batch overruns its target wall-clock,
+// starving IDLE1 → task watchdog trips.
+//
+// Pragma: ALWAYS vTaskDelay(1) between batches so IDLE1 runs every
+// FreeRTOS tick (10ms default). The engine runs as fast as the CPU
+// allows during the active portion of each tick. Effective rate is
+// ~2000 cycles / 10ms = ~200 kHz simulated, ~5x slower than nominal
+// AGC clock. Luminary doesn't care about absolute wall-clock speed,
+// only about relative cycle ordering and interrupt-period ratios.
 static void agc_task(void *arg)
 {
     (void)arg;
-    const int batch_cycles = 10240;        // ~10ms simulated per batch
-    const int batch_period_us = 10000;     // wall-clock target per batch
-    int64_t next_tick_us = esp_timer_get_time();
+    const int batch_cycles = 2000;   // ~few ms wall-clock on ESP32
     for (;;) {
         agc_core_step(batch_cycles);
-        next_tick_us += batch_period_us;
-        int64_t now = esp_timer_get_time();
-        int64_t gap = next_tick_us - now;
-        if (gap > 0) {
-            // Coarse sleep for >1 tick, then yield for the remainder.
-            TickType_t ticks = pdMS_TO_TICKS(gap / 1000);
-            if (ticks > 0) vTaskDelay(ticks);
-            else taskYIELD();
-        } else if (gap < -50000) {
-            // Drifted >50ms behind real-time — reset baseline to avoid
-            // a runaway catch-up loop that would starve the other core.
-            next_tick_us = esp_timer_get_time();
-        } else {
-            // Slightly behind: yield once and re-enter loop without
-            // resetting the baseline, so we catch up over the next few
-            // batches.
-            taskYIELD();
-        }
+        vTaskDelay(1);   // always yield ≥1 tick to IDLE1 + lower-pri tasks
     }
 }
 

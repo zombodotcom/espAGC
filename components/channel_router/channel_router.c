@@ -389,7 +389,9 @@ void channel_router_on_routine(void)
 void channel_router_post_key(int code)
 {
     bool dropped = false;
+#ifdef CONFIG_AGC_TRACE_KEYRUPT1
     uint16_t head_after = 0, tail_after = 0;
+#endif
     taskENTER_CRITICAL(&g_key_mux);
     uint16_t next = g_key_head + 1;
     if ((uint16_t)(next - g_key_tail) > KEY_RING_SZ) {
@@ -398,8 +400,10 @@ void channel_router_post_key(int code)
         g_key_ring[g_key_head % KEY_RING_SZ] = (uint8_t)(code & 0x1F);
         g_key_head = next;
     }
+#ifdef CONFIG_AGC_TRACE_KEYRUPT1
     head_after = g_key_head;
     tail_after = g_key_tail;
+#endif
     taskEXIT_CRITICAL(&g_key_mux);
     if (dropped) {
         ESP_LOGW(TAG, "key ring full, dropping %d", code);
