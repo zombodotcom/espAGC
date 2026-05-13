@@ -343,6 +343,29 @@ void peripheral_stub_set_descent_thrust(int active)
         g_lr_range_cft    = 50000L * 100;
         g_rnrad_remainder = 0;
         g_pipa_z_remainder = 0;
+
+#ifdef CONFIG_AGC_YAAGC_SOCKET
+        // Tell Luminary the LR antenna is in position 1 (altitude beam).
+        // THE_LUNAR_LANDING.agc:245 (P63SPOT3) spins on:
+        //   CA   BIT6        # IS THE LR ANTENNA IN POSITION 1 YET
+        //   RAND CHAN33
+        //   BZF  P63SPOT4    # BRANCH IF ANTENNA ALREADY IN POSITION 1
+        // i.e. it falls through to "PLEASE CRANK THE SILLY THING AROUND"
+        // until bit 6 of ch033 is clear. Our LM_INI sets ch033 to 077776
+        // which leaves bit 6 set ("NOT pos 1"), so without this nudge
+        // P63 never gets past the antenna check and LRALT (which reads
+        // RNRAD into the altitude register) never runs.
+        //
+        // Inject through the canonical mask+value drain: a narrow mask
+        // packet (BIT6 = 0o40) lets us clear just that bit, leaving
+        // everything else current. Then restore the synthetic client's
+        // ch033 mask to full so any later writes here behave normally.
+        extern int yaagc_socket_inject_packet(int, int, int);
+        yaagc_socket_inject_packet(033, 0o40,    1);   // narrow mask: BIT6 only
+        yaagc_socket_inject_packet(033, 0,       0);   // value: BIT6 = 0
+        yaagc_socket_inject_packet(033, 077777,  1);   // restore full mask
+        ESP_LOGI(PSTUB_TAG, "ch033 BIT6 cleared (LR antenna -> pos 1)");
+#endif
     }
     ESP_LOGI(PSTUB_TAG,
              "descent sim: %s (PIPAZ ~52 Hz, RNRAD from 50000 ft @ 300 ft/s)",

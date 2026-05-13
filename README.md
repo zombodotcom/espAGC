@@ -117,13 +117,18 @@ Toggling the button OFF and ON resets the LR range to 50 000 ft so you can re-ru
 
 ### What you'll see — be set up to be honest with reality
 
-You'll **see** PROG = 63, VERB = 16, NOUN = 63, and COMP ACTY blinking — proof the engine is integrating the pulse stream. You **won't** see realistic altitude in R1, descent rate in R2, or time-to-go in R3. They'll stay at `+00000`.
+You'll **see** PROG = 63, VERB = 16, NOUN = 63 (or 68), and COMP ACTY blinking — proof the engine is processing the pulse stream. You **won't** see realistic altitude in R1, descent rate in R2, or time-to-go in R3. They'll stay at `+00000`.
 
-That's because Apollo P63's altitude / velocity output is `f(initial state vector, integrated PIPA deltas, LR corrections)`. Without an initial state vector (R₀, V₀) loaded at the moment of PDI, the integrator starts at zero and stays there — pulses are accumulated against a zero baseline, so what the AGC computes as "altitude" is just `0 + integrated noise`.
+P63's autodisplay output isn't a passive readout of the LR range counter — it's the result of a long pipeline:
 
-On the actual Apollo 11 mission, the state vector was **uplinked from Mission Control** in the minutes before PDI via the canonical [DIGITAL UPLINK](https://github.com/virtualagc/virtualagc/blob/master/Luminary099/DIGITAL_UPLINK.agc) protocol on channel `0o173`. Crew could also load it manually via a long V21/V22 type-in sequence with octal digits from the PAD.
+1. **P63SPOT3 antenna gate** — `THE_LUNAR_LANDING.agc:245` spins on `CA BIT6 / RAND CHAN33 / BZF P63SPOT4`. Until ch033 bit 6 ("LR antenna in position 1") clears, P63 sits in the "PLEASE CRANK THE SILLY THING AROUND" wait loop. **Fixed in this release**: enabling descent thrust now injects ch033 bit 6 = 0 through the canonical drain, so P63 advances past the antenna check.
+2. **SETPOS1 → BURNBABY → IGNALG** — Luminary's ignition algorithm. Needs DAP coefficients (LM mass, thrust scaling) from a pre-launch pad load. Without those, IGNALG iterates without converging.
+3. **SERVICER's LR cycle** — R12 schedules `LRALT` (`P20-P25.agc:2738`) at the right cadence. `LRALT` reads RNRAD into the AGC's filtered altitude estimate.
+4. **State vector integration** — the displayed altitude is `f(R₀ uplinked from MCC, integrated PIPA deltas, LR corrections weighted against estimated altitude variance)`. With `R₀ = 0` everything starts at the lunar surface.
 
-We don't do either yet. That's the next release. The pulse plumbing on this side is correct — verified by watching PIPAZ pulses arrive via the canonical drain — but the initial conditions to make the integration meaningful are missing. Honest progress, not theatre.
+We do (1) now. Steps (2)–(4) need the full Apollo pad-load infrastructure — REFSMMAT initialisation, DAP coefficient load, ch0173 UPRUPT state-vector inject (the protocol MCC used to uplink R₀/V₀ in real time). That's a separate, larger project; see [Roadmap](#roadmap).
+
+What this release does ship is a verified-correct pulse path through the canonical drain: **PIPAZ pulses are reaching the AGC's PIPA counters, RNRAD pulses are reaching the LR range counter, and the antenna-position gate is unlocked.** When the pad-load / uplink work lands, those pulses will start meaning something. Until then, descent thrust is "I/O wiring proven correct" rather than "realistic landing simulator". Honest progress, not theatre.
 
 ### What "stop descent thrust" does
 
