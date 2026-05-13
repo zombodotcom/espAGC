@@ -59,20 +59,29 @@ static esp_err_t handle_key(httpd_req_t *req)
 
 // GET /seqs -> JSON list of available canned sequences:
 //   [{"i":0,"name":"...","desc":"..."}, ...]
+//
+// Stream-chunked: each entry is sent separately so adding long verbose
+// descriptions (e.g. the V71 Apollo 11 state-vector sequence) doesn't
+// silently truncate the JSON. Previously a 1 KB stack buffer was used,
+// and snprintf would write past the end as off advanced beyond
+// sizeof(buf), producing a corrupt response and a JSON.parse error
+// in the browser at column ~1016.
 static esp_err_t handle_seqs(httpd_req_t *req)
 {
-    char buf[1024];
-    int  off = 0;
-    off += snprintf(buf + off, sizeof(buf) - off, "[");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send_chunk(req, "[", 1);
+    char entry[512];
     for (int i = 0; i < sequences_count(); i++) {
         const sequence_t *s = sequences_get(i);
-        off += snprintf(buf + off, sizeof(buf) - off,
-                        "%s{\"i\":%d,\"name\":\"%s\",\"desc\":\"%s\"}",
-                        i ? "," : "", i, s->name, s->description);
+        int n = snprintf(entry, sizeof(entry),
+                         "%s{\"i\":%d,\"name\":\"%s\",\"desc\":\"%s\"}",
+                         i ? "," : "", i, s->name, s->description);
+        if (n < 0) n = 0;
+        if (n > (int)sizeof(entry) - 1) n = (int)sizeof(entry) - 1;
+        httpd_resp_send_chunk(req, entry, n);
     }
-    off += snprintf(buf + off, sizeof(buf) - off, "]");
-    httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, buf, off);
+    httpd_resp_send_chunk(req, "]", 1);
+    return httpd_resp_send_chunk(req, NULL, 0);   // end of chunks
 }
 
 // POST /seq -> body is the integer index of the sequence to run.

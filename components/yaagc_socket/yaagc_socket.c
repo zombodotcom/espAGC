@@ -284,10 +284,24 @@ int yaagc_socket_channel_input(agc_t *State)
             int k;
             if (c->sock == SYNTHETIC_SOCK_FD) {
                 k = (local_ring_pop_byte(&ch) == 0) ? 1 : 0;
+                if (k <= 0) break;     // ring empty — try again next cycle
             } else {
                 k = recv(c->sock, (char *)&ch, 1, 0);
+                if (k == 0 ||
+                    (k < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
+                    // Peer closed (k=0) or hard error — release the slot.
+                    // Without this, after enough probe disconnects every
+                    // slot ends up with a stale fd and lwIP's socket pool
+                    // exhausts (httpd starts returning accept errno 23).
+                    ESP_LOGI(TAG, "client %d closed (recv=%d errno=%d)",
+                             i, k, errno);
+                    close(c->sock);
+                    c->sock = -1;
+                    c->Size = 0;
+                    break;
+                }
+                if (k < 0) break;       // EAGAIN — no data right now
             }
-            if (k <= 0) break;
             // Same signature filter as SocketAPI lines 192-205. Rejects
             // mid-packet garbage so we can resync if the stream skews.
             static const unsigned char Signatures[4] = {0x00, 0x40, 0x80, 0xC0};
