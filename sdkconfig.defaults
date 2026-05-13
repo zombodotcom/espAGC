@@ -22,12 +22,7 @@ CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=16
 # Touch driver
 CONFIG_ESPAGC_CYD_TOUCH_CST820=y
 
-# Canonical SocketAPI port — engine I/O over ch0173 / ch015 / ch010 follows
-# the same 4-byte protocol yaAGC.exe uses on Pi/Linux, so the device shows
-# up as a drop-in yaAGC node to any peer that speaks it. Required for V37
-# program transitions, the UPRUPT (Mission Control) keystroke path, and
-# the ch033 BIT6 antenna-position gate clear from the descent thrust
-# simulator. Kconfig default is already y; pinning here so a fresh clone
-# + plain `idf.py build` is guaranteed to ship the canonical path.
-CONFIG_AGC_YAAGC_SOCKET=y
-CONFIG_AGC_YAAGC_SOCKET_PORT=19850
+# Canonical SocketAPI listener port — engine I/O follows the same 4-byte
+# protocol yaAGC.exe uses on Pi/Linux, so the device shows up as a
+# drop-in yaAGC node to any peer that speaks it.
+CONFIG_AGC_YAAGC_NODE_PORT=19850

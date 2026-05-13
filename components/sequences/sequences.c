@@ -240,12 +240,8 @@ const sequence_t *sequences_get(int i)          { return (i >= 0 && i < TABLE_CO
 
 static SemaphoreHandle_t s_busy;     // taken while a sequence is running
 
-// Forward decl — provided by components/yaagc_socket when the canonical
-// path is on. Falls back to no-op when off (legacy host tests don't link
-// the symbol, so calls below are gated).
-#ifdef CONFIG_AGC_YAAGC_SOCKET
+// CCC-encoded UPRUPT (ch0173) injector — provided by components/yaagc_socket.
 extern int yaagc_socket_inject_uplink_key(int code);
-#endif
 
 static void runner_task(void *arg)
 {
@@ -257,13 +253,7 @@ static void runner_task(void *arg)
                  via_uplink ? "UPRUPT/ch0173" : "KEYRUPT1/ch015");
         for (int i = 0; i < s->key_count; i++) {
             if (via_uplink) {
-#ifdef CONFIG_AGC_YAAGC_SOCKET
                 yaagc_socket_inject_uplink_key(s->keys[i]);
-#else
-                // UPRUPT path requires the canonical socket layer. Fall
-                // back to KEYRUPT1 so the sequence at least visibly runs.
-                channel_router_post_key(s->keys[i]);
-#endif
             } else {
                 channel_router_post_key(s->keys[i]);
             }

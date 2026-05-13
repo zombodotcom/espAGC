@@ -40,13 +40,6 @@ void peripheral_stub_tick(agc_t *state);
 // IMU.
 void peripheral_stub_on_output(int channel, int value);
 
-// Notify peripheral_stub that a DSKY keypress has been queued in the
-// channel_router. Used to arm the aggressive CHARIN force-dispatch
-// rescue, which fires when the engine fails to reach CHARIN code within
-// ~50ms of the keypress (works around the known slot-allocation bug
-// where NOVAC stores priority/CADR in the wrong cells).
-void peripheral_stub_on_keypress_posted(uint8_t code);
-
 // Toggle simulated DPS descent thrust. While active, peripheral_stub_step
 // fires PIPAZ- pulses at ~52 Hz so SERVICER sees the LM as decelerating
 // along body +Z. Off by default — only useful when a powered-descent

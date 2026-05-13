@@ -51,19 +51,6 @@ static const char *TAG = "chrouter";
 static dsky_state_t  g_snapshot;
 static SemaphoreHandle_t g_mutex;
 
-// Keypress ring. Producer side runs in HTTP/touch task context (and could
-// in theory be called from a touch ISR); consumer side runs in the AGC
-// engine task via ChannelInput. `volatile` alone is insufficient — it
-// doesn't make the (slot-write + head-increment) compound atomic, so a
-// task switch between the two can leave the consumer reading a torn
-// slot. portMUX_TYPE is the right primitive: short critical sections,
-// ISR-safe, no priority inversion.
-#define KEY_RING_SZ 32
-static portMUX_TYPE      g_key_mux = portMUX_INITIALIZER_UNLOCKED;
-static volatile uint8_t  g_key_ring[KEY_RING_SZ];
-static volatile uint16_t g_key_head;     // producer (input transports)
-static volatile uint16_t g_key_tail;     // consumer (engine task)
-
 static dsky_digit_t decode_digit(int code5)
 {
     // AGC 5-bit illuminated digit code -> 0..9 or blank. Same table the
@@ -278,52 +265,6 @@ void channel_router_on_output(int channel, int value)
     xSemaphoreGive(g_mutex);
 }
 
-int channel_router_pump_input(void *agc_state)
-{
-    agc_t *state = (agc_t *)agc_state;
-    uint8_t code;
-    bool have_key = false;
-
-    // Match yaAGC's socket interlace (--interlace=N default is 50, set in
-    // agc_cli.c: `Options.interlace = 50`). yaAGC's SocketAPI ChannelInput
-    // only polls the socket every 50 CPU cycles; in between, keys sit in
-    // the kernel socket buffer. This 50-cycle window means KEYRUPT1 fires
-    // at a non-deterministic-but-bounded cycle offset relative to engine
-    // interrupt state.
-    //
-    // Before this throttle, our pump fired every cycle — KEYRUPT1
-    // always fired at cycle 0 of the next batch. That deterministic
-    // alignment crashed the engine to Z=0 on the second V37+ENTR even
-    // with upstream agc_engine_init.c (verified by test_ref_v37_slots).
-    // WSL reference doesn't crash because its 50-cycle window
-    // randomizes the alignment.
-    static int s_interlace = 0;
-    if (s_interlace > 0) { s_interlace--; return 0; }
-    s_interlace = 50;
-
-    taskENTER_CRITICAL(&g_key_mux);
-    if (g_key_tail != g_key_head) {
-        code = g_key_ring[g_key_tail % KEY_RING_SZ];
-        g_key_tail++;
-        have_key = true;
-    }
-    taskEXIT_CRITICAL(&g_key_mux);
-    if (have_key) {
-        // Channel 015 input: 5-bit keycode. Route through WriteIO so the
-        // engine's RSET-clears-RestartLight side-effect (agc_engine.c:586)
-        // fires; a direct InputChannel[015] = code skips it and the RESTART
-        // lamp stays latched forever. Raise KEYRUPT1 after.
-        WriteIO(state, 015, code & 037);
-        state->InterruptRequests[5] = 1;
-#ifdef CONFIG_AGC_TRACE_KEYRUPT1
-        ESP_LOGI(TAG, "pump: pulled code=%02o ir5=%d ch015=%05o",
-                 code & 037, state->InterruptRequests[5],
-                 state->InputChannel[015]);
-#endif
-    }
-    return 0;       // process one key per engine call
-}
-
 void channel_router_on_routine(void)
 {
     peripheral_stub_tick(agc_core_state());
@@ -393,51 +334,15 @@ void channel_router_on_routine(void)
 
 void channel_router_post_key(int code)
 {
-#ifdef CONFIG_AGC_YAAGC_SOCKET
-    // Route the keypress through the canonical SocketAPI drain. This is
-    // the path that just proved 5/5 on host (test_yaagc_socket_local +
-    // test_yaagc_socket_host). The synthetic-client byte ring queues a
-    // single 4-byte packet for ch015; ChannelInput inside agc_engine
-    // picks it up on the next drain cycle, applies the mask logic, and
-    // does WriteIO + IR5 the way yaAGC.exe does. No need for the
-    // ring/force-dispatch dance — the canonical path is sufficient.
+    // Route the keypress through the canonical SocketAPI drain — the
+    // synthetic-client byte ring queues a single 4-byte ch015 packet,
+    // ChannelInput inside agc_engine picks it up on the next drain
+    // cycle, applies the mask logic, and does WriteIO + IR5 the way
+    // yaAGC.exe does on Pi/Linux.
     extern int yaagc_socket_inject_key(int code);
     if (yaagc_socket_inject_key(code) != 0) {
         ESP_LOGW(TAG, "yaagc_socket inject_key full, dropping %d", code);
     }
-    return;
-#else
-    bool dropped = false;
-#ifdef CONFIG_AGC_TRACE_KEYRUPT1
-    uint16_t head_after = 0, tail_after = 0;
-#endif
-    taskENTER_CRITICAL(&g_key_mux);
-    uint16_t next = g_key_head + 1;
-    if ((uint16_t)(next - g_key_tail) > KEY_RING_SZ) {
-        dropped = true;
-    } else {
-        g_key_ring[g_key_head % KEY_RING_SZ] = (uint8_t)(code & 0x1F);
-        g_key_head = next;
-    }
-#ifdef CONFIG_AGC_TRACE_KEYRUPT1
-    head_after = g_key_head;
-    tail_after = g_key_tail;
-#endif
-    taskEXIT_CRITICAL(&g_key_mux);
-    if (dropped) {
-        ESP_LOGW(TAG, "key ring full, dropping %d", code);
-        return;
-    }
-#ifdef CONFIG_AGC_TRACE_KEYRUPT1
-    ESP_LOGI(TAG, "post: code=%02o queued, head=%u tail=%u",
-             code & 0x1F, (unsigned)head_after, (unsigned)tail_after);
-#endif
-    // Arm CHARIN force-dispatch in peripheral_stub. If the engine fails
-    // to reach CHARIN within ~50ms, peripheral_stub_tick will manually
-    // set up the engine to execute CHARIN — works around the slot-
-    // allocation bug that prevents normal dispatch during cold boot.
-    if (!dropped) peripheral_stub_on_keypress_posted((uint8_t)(code & 0x1F));
-#endif
 }
 
 uint64_t channel_router_snapshot(dsky_state_t *out)

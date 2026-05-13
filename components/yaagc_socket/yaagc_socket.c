@@ -15,9 +15,9 @@
 // This file provides:
 //   ChannelInput / ChannelOutput / ChannelRoutine — the three entry
 //   points the engine calls each cycle (see agc_engine.c:1942-1952).
-// When CONFIG_AGC_YAAGC_SOCKET is enabled, io_callbacks.c forwards
-// these calls into here; otherwise they keep the legacy channel_router
-// pump_input / on_output behaviour.
+// io_callbacks.c forwards every per-cycle I/O call into these entry
+// points so peripherals (TCP peers + local touch/web/serial via the
+// synthetic-client byte ring) all share the canonical 4-byte drain.
 
 #include "yaagc_socket.h"
 
@@ -235,8 +235,8 @@ static void update_peripheral_connect(yaagc_client_t *c, agc_t *State)
 }
 
 // ---------------------------------------------------------------------------
-// Engine-facing entry points. These get called from io_callbacks.c when
-// CONFIG_AGC_YAAGC_SOCKET is on. Signatures match the canonical SocketAPI.
+// Engine-facing entry points. Called every cycle from io_callbacks.c.
+// Signatures match the canonical SocketAPI.
 
 void yaagc_socket_channel_output(agc_t *State, int Channel, int Value)
 {

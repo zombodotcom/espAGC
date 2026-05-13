@@ -28,9 +28,7 @@
 #include "touch_input.h"
 #include "dsky_layout.h"
 
-#ifdef CONFIG_AGC_YAAGC_SOCKET
 #include "yaagc_socket.h"
-#endif
 
 #include "driver/gpio.h"
 #include "driver/uart.h"
@@ -233,22 +231,19 @@ void app_main(void)
         }
     }
 
-#ifdef CONFIG_AGC_YAAGC_SOCKET
-    // Canonical SocketAPI listener (Task #18). MUST run before
-    // agc_task starts — the engine's first ChannelOutput will iterate
-    // s_clients[], and if the array is still zero-initialised at that
-    // point every slot looks like fd=0 to send(), triggering an
-    // immediate "client 0 dropped (send errno=9)" and tearing down
-    // the synthetic local client (slot 0). Bring the listener up
-    // BEFORE creating the engine task so its slot table is in the
-    // right shape (synthetic at 0, -1 elsewhere) by the time the
-    // first engine cycle runs.
-    int sock_rc = yaagc_socket_init(CONFIG_AGC_YAAGC_SOCKET_PORT);
+    // Canonical SocketAPI listener. MUST run before agc_task starts —
+    // the engine's first ChannelOutput iterates s_clients[], and if the
+    // array is still zero-initialised at that point every slot looks
+    // like fd=0 to send(), triggering an immediate "client 0 dropped
+    // (send errno=9)" and tearing down the synthetic local client
+    // (slot 0). Bring the listener up BEFORE creating the engine task
+    // so its slot table is in the right shape (synthetic at 0, -1
+    // elsewhere) by the time the first engine cycle runs.
+    int sock_rc = yaagc_socket_init(CONFIG_AGC_YAAGC_NODE_PORT);
     if (sock_rc != 0) {
         ESP_LOGE(TAG, "yaagc_socket_init failed (port %d)",
-                 CONFIG_AGC_YAAGC_SOCKET_PORT);
+                 CONFIG_AGC_YAAGC_NODE_PORT);
     }
-#endif
 
     // ESP32 dual-core: pin AGC engine to APP_CPU (core 1) at high
     // priority so its real-time pacing isn't perturbed by WiFi/touch

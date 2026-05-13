@@ -8,6 +8,7 @@
 #include "channel_router.h"
 #include "dsky_keys.h"
 #include "peripheral_stub.h"
+#include "yaagc_socket.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -45,6 +46,12 @@ void harness_boot(void)
     channel_router_init();
     int rc = agc_core_init(rom, sz);
     if (rc != 0) { fprintf(stderr, "agc_core_init -> %d\n", rc); exit(1); }
+    // Bring up the canonical SocketAPI synthetic-client slot before any
+    // peripheral_stub LM_INI runs. Port 0 binds an ephemeral OS-picked
+    // listener — fine for unit tests, nothing connects to it.
+    if (yaagc_socket_init(0) != 0) {
+        fprintf(stderr, "yaagc_socket_init(0) failed\n"); exit(1);
+    }
     peripheral_stub_init();
     // No alarm-inhibit: upstream yaAGC's natural cold-boot recovery
     // depends on NW / TC-Trap firing during STARTSUB, triggering GOJAM,

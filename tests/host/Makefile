@@ -30,6 +30,7 @@ AGC_CORE  := $(ROOT)/components/agc_core
 DISP_HAL  := $(ROOT)/components/display_hal
 CH_ROUTER := $(ROOT)/components/channel_router
 PSTUB     := $(ROOT)/components/peripheral_stub
+YAAGC_SOCK := $(ROOT)/components/yaagc_socket
 ROM       := $(ROOT)/build/roms/Luminary099.bin
 
 INC     := -I$(YAAGC) -I$(AGC_CORE)/include -I.
@@ -42,15 +43,18 @@ ENGINE_SRCS := \
 INIT_SRCS    := $(AGC_CORE)/agc_init.c
 HOST_STUBS   := test_io_stub.c
 
-# Layer 2 build: real channel_router + io_callbacks compiled with shims.
+# Layer 2 build: real channel_router + io_callbacks + canonical yaagc_socket
+# (synthetic-client mode, port 0 = OS-picked ephemeral so no fixed-port
+# collisions across parallel CI runs) compiled with FreeRTOS/ESP_LOG shims.
 HARNESS_INC  := -I$(YAAGC) -I$(AGC_CORE)/include -I$(CH_ROUTER)/include \
-                -I$(PSTUB)/include -Iinclude -I.
+                -I$(PSTUB)/include -I$(YAAGC_SOCK)/include -Iinclude -I.
 HARNESS_SRCS := \
     $(ENGINE_SRCS) \
     $(INIT_SRCS) \
     $(AGC_CORE)/io_callbacks.c \
     $(CH_ROUTER)/channel_router.c \
     $(PSTUB)/peripheral_stub.c \
+    $(YAAGC_SOCK)/yaagc_socket.c \
     agc_harness.c
 
 LAYER1_TESTS := test_rom_load test_engine_boot test_channel10_emit
@@ -64,19 +68,19 @@ LAYER2_FAILING_TESTS := test_p00_select_retry
 # test_ref_compare needs CONFIG_AGC_LOG_ALL_OUTPUTS for raw-channel
 # emission. Built separately with its own rule.
 test_ref_compare.exe: test_ref_compare.c $(HARNESS_SRCS)
-	$(CC) $(CFLAGS) -DCONFIG_AGC_LOG_ALL_OUTPUTS=1 $(HARNESS_INC) -o $@ $^ -lm -lpthread
+	$(CC) $(CFLAGS) -DCONFIG_AGC_LOG_ALL_OUTPUTS=1 $(LAYER2_DEFS) $(HARNESS_INC) -o $@ $^ $(LAYER2_LIBS)
 
 # test_state_compare writes yaAGC-format core dumps at 1-sec wall-clock
 # intervals while driving the V37E00E sequence. Use parse_core_dump.py
 # to diff against tests/host/wsl_dumps/ref/core.NNN (WSL ground truth).
 test_state_compare.exe: test_state_compare.c $(HARNESS_SRCS)
-	$(CC) $(CFLAGS) -DCONFIG_AGC_LOG_ALL_OUTPUTS=1 $(HARNESS_INC) -o $@ $^ -lm -lpthread
+	$(CC) $(CFLAGS) -DCONFIG_AGC_LOG_ALL_OUTPUTS=1 $(LAYER2_DEFS) $(HARNESS_INC) -o $@ $^ $(LAYER2_LIBS)
 
 # test_slot_writes runs V37E00E*2 stepping one instruction at a time and
 # logs every write to slot-0 (E[0][0164..0167]). Identifies the Z address
 # that writes the corrupt PRIO=030401 LOC=02146 BBCON=00401 values.
 test_slot_writes.exe: test_slot_writes.c $(HARNESS_SRCS)
-	$(CC) $(CFLAGS) -DCONFIG_AGC_LOG_ALL_OUTPUTS=1 $(HARNESS_INC) -o $@ $^ -lm -lpthread
+	$(CC) $(CFLAGS) -DCONFIG_AGC_LOG_ALL_OUTPUTS=1 $(LAYER2_DEFS) $(HARNESS_INC) -o $@ $^ $(LAYER2_LIBS)
 
 # verify-ref: run our build through the same V35E + V37E00E sequence as
 # ref_capture.py and assert no must-match channel emits values the
@@ -124,7 +128,7 @@ test_canonical_match.exe: test_canonical_match.c $(YAAGC)/agc_engine.c \
 # windows_yaagc_test.py (pointed at this exe, or just connect from any
 # canonical client). If V37E00E×2 succeeds 5/5 here, the architectural
 # fix in components/yaagc_socket/ is the right path for ESP32/QEMU too.
-YAAGC_SOCK := $(ROOT)/components/yaagc_socket
+# (YAAGC_SOCK is now defined above with the other component path roots.)
 test_yaagc_socket_host.exe: test_yaagc_socket_host.c $(YAAGC_SOCK)/yaagc_socket.c \
                             $(YAAGC)/agc_engine.c $(YAAGC)/agc_engine_init.c \
                             $(YAAGC)/Backtrace.c $(YAAGC)/DecodeDigitalDownlink.c \
@@ -189,16 +193,19 @@ test_keypad_hit.exe: test_keypad_hit.c $(DISP_HAL)/dsky_keypad_320x240.c
 # --- Layer 2a: real channel_router + harness ------------------------------
 # test_replay only needs channel_router (no engine); but compiling it the
 # same way as the rest is simpler and the binaries are still small.
-# Host Layer-2 tests build with auto-RSET ON. On firmware the same flag
-# lives in sdkconfig (set by Kconfig). channel_router.c uses `#ifdef`,
-# so the symbol must be defined here to match Kconfig=y behavior.
+# Host Layer-2 tests build with auto-RSET ON and the canonical SocketAPI
+# drain ON — same flags the firmware ships with. -lws2_32 -lpthread cover
+# yaagc_socket.c's winsock + pthread usage on host (no-ops on real ESP-IDF).
+LAYER2_DEFS := -DCONFIG_AGC_AUTO_RSET_AT_BOOT=1 \
+               -DCONFIG_AGC_YAAGC_NODE_PORT=0
+LAYER2_LIBS := -lm -lpthread -lws2_32
+
 $(addsuffix .exe, $(LAYER2_TESTS) $(LAYER2_FAILING_TESTS)): %.exe: %.c $(HARNESS_SRCS)
-	$(CC) $(CFLAGS) -DCONFIG_AGC_AUTO_RSET_AT_BOOT=1 $(HARNESS_INC) -o $@ $^ -lm
+	$(CC) $(CFLAGS) $(LAYER2_DEFS) $(HARNESS_INC) -o $@ $^ $(LAYER2_LIBS)
 
 # Diagnostic tests use the same build rule. Not in `run` target.
-# -lpthread for the async-keypress-based diagnostics; harmless for others.
 $(addsuffix .exe, $(DIAG_TESTS)): %.exe: %.c $(HARNESS_SRCS)
-	$(CC) $(CFLAGS) -DCONFIG_AGC_AUTO_RSET_AT_BOOT=1 $(HARNESS_INC) -o $@ $^ -lm -lpthread
+	$(CC) $(CFLAGS) $(LAYER2_DEFS) $(HARNESS_INC) -o $@ $^ $(LAYER2_LIBS)
 
 # --- Layer 2b: renderer pixel tests ---------------------------------------
 RENDER_SRCS := \

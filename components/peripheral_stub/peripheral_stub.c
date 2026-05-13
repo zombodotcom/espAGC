@@ -207,14 +207,12 @@ void peripheral_stub_init(void)
     // sequence interprets the LM_INI arrival as part of its cold-boot
     // hand-off (IMU coming up, etc.). If LM_INI is present at cycle 0,
     // the engine takes a DIFFERENT path through DAPIDLER's first T5RUPT
-    // and ends in the 1/ACCSET interpretive GOTO deadlock — which our
-    // rescue chain papers over but with WarningFilter side effects that
-    // clear ch033 bit 13 (AGC WARNING input) and prevent V37E00E from
-    // completing (verified 2026-05-12 by diffing core.022 from
-    // wsl_dumps/ref vs our host_v37x2 dumps).
+    // and ends in the 1/ACCSET interpretive GOTO deadlock that older
+    // rescue hacks papered over with WarningFilter side effects (those
+    // cleared ch033 bit 13 and prevented V37E00E from completing).
     //
-    // Instead, peripheral_stub_tick will write LM_INI after a delay
-    // matching canonical's ~1s pre-LM_INI window. See g_lm_ini_pending.
+    // Instead, peripheral_stub_tick writes LM_INI after a delay matching
+    // canonical's ~1s pre-LM_INI window. See g_lm_ini_pending.
     //
     // LM-only: the channels we initialise (ch016 MARK, ch030..033 LM
     // discrete inputs) carry LM-specific bit assignments. Writing them
@@ -344,7 +342,6 @@ void peripheral_stub_set_descent_thrust(int active)
         g_rnrad_remainder = 0;
         g_pipa_z_remainder = 0;
 
-#ifdef CONFIG_AGC_YAAGC_SOCKET
         // Tell Luminary the LR antenna is in position 1 (altitude beam).
         // THE_LUNAR_LANDING.agc:245 (P63SPOT3) spins on:
         //   CA   BIT6        # IS THE LR ANTENNA IN POSITION 1 YET
@@ -356,16 +353,14 @@ void peripheral_stub_set_descent_thrust(int active)
         // P63 never gets past the antenna check and LRALT (which reads
         // RNRAD into the altitude register) never runs.
         //
-        // Inject through the canonical mask+value drain: a narrow mask
-        // packet (BIT6 = 0o40) lets us clear just that bit, leaving
-        // everything else current. Then restore the synthetic client's
-        // ch033 mask to full so any later writes here behave normally.
+        // Narrow mask packet (BIT6 = 0o40) clears just that bit, then
+        // restores the synthetic client's ch033 mask so later writes
+        // here behave normally.
         extern int yaagc_socket_inject_packet(int, int, int);
         yaagc_socket_inject_packet(033, 0o40,    1);   // narrow mask: BIT6 only
         yaagc_socket_inject_packet(033, 0,       0);   // value: BIT6 = 0
         yaagc_socket_inject_packet(033, 077777,  1);   // restore full mask
         ESP_LOGI(PSTUB_TAG, "ch033 BIT6 cleared (LR antenna -> pos 1)");
-#endif
     }
     ESP_LOGI(PSTUB_TAG,
              "descent sim: %s (PIPAZ ~52 Hz, RNRAD from 50000 ft @ 300 ft/s)",
@@ -506,348 +501,6 @@ void peripheral_stub_step(agc_t *state, uint32_t dt_us)
     }
 }
 
-// ===========================================================================
-// LEGACY RESCUE CHAIN (only compiled when !CONFIG_AGC_YAAGC_SOCKET)
-// ===========================================================================
-// These functions papered over the in-process-driver bug that
-// CONFIG_AGC_YAAGC_SOCKET fixes structurally. With the canonical socket
-// port (default on firmware), the engine handles CHARIN dispatch / job
-// swaps / interpretive deadlocks correctly through the same path
-// yaAGC.exe uses on Pi/Linux — these rescues are dead code.
-//
-// Kept under #ifndef CONFIG_AGC_YAAGC_SOCKET so host Layer-2 tests that
-// compile without the flag (and therefore use the legacy
-// channel_router_pump_input + force_dispatch path) continue to link
-// and pass. The firmware binary doesn't carry any of this.
-//
-// Remove the whole #ifndef block once the host test layer is migrated
-// to the canonical drain too (next-but-one cleanup).
-#ifndef CONFIG_AGC_YAAGC_SOCKET
-
-// Stuck-job recovery via simulated GOJAM. Cold-boot Luminary's
-// 1/ACCSET (PRIO27 + offset 110 = priority 027110, allocated by
-// DAPIDLER) enters interpretive code that gets caught in
-// INTERPRETER.agc:681 GOTO indirection with POLISH=0 reading
-// Erasable[4][044]=0 indefinitely. Block II AGC is non-preemptive
-// and the GOTOERS loop doesn't reach DANZIG (where NEWJOB is
-// checked), so the executive can never swap CHARIN in.
-//
-// Real Apollo had this never happen because the crew's pre-launch
-// PAD LOAD set MASS/DAP coefficients to values that let 1/ACCS
-// converge cleanly. Without those values, 1/ACCS's interpretive
-// computation degenerates. LM_Simulator over a socket would also
-// keep the engine fed via ParseIoPacket / UnprogrammedIncrement.
-//
-// Recovery: when NEWJOB indicates a higher-priority job is waiting
-// across multiple consecutive ticks (current job never yields),
-// simulate a hardware GOJAM — the same recovery yaAGC does on alarm
-// trips (agc_engine.c:2246-2295). GOJAM sets Z=04000, clears
-// interrupt state, and runs FRESH_START → DORSTART, which restarts
-// the system from a known-clean state. The pending CHARIN job in
-// slot 1 is restored by DORSTART's RESTART logic (slot CADRs are
-// preserved across software restarts), so the keypress that
-// triggered the original CHARIN allocation gets processed normally.
-// Rescue can fire multiple times. Each GOJAM gets the engine past
-// one round of 1/ACCSET deadlock, but since FRESH_START re-clears
-// RCSFLAGS bit 13, DAPIDLER will re-NOVAC 1/ACCSET on its next
-// T5RUPT. The rescue fires again on the next stuck detection. Cap at
-// MAX_RESCUES to avoid runaway GOJAM if something else is broken.
-#define STUCK_THRESHOLD   2
-// Allow multiple GOJAM rescues. Each fired GOJAM runs the engine's
-// own FRESH_START → DORSTART → SETINFL path, which clears RASFLAG
-// BIT7+BIT14 (FRESH_START.agc SETINFL block) and re-runs the restart
-// phase tables. V37 needs at least one GOJAM AFTER its own INTSTALL
-// sleep to clear the orphan BIT14 set by the cold-boot interpretive
-// caller in bank 23. Trigger is NEWJOB-stuck-across-ticks — fires
-// only when a higher-priority job genuinely can't yield.
-#define MAX_RESCUES       4
-static int      g_last_newjob   = 0;
-static int      g_stuck_count   = 0;
-static int      g_rescue_count  = 0;
-
-static void simulate_gojam(agc_t *s)
-{
-    // Mirror agc_engine.c GOJAM (line 2246-2298) exactly.
-    s->ExtraDelay += 2;                      // GOJAM + TC 4000 timing
-    s->Erasable[0][2] = s->Erasable[0][5];   // RegQ <- old Z
-    s->Erasable[0][5] = 04000;               // RegZ -> FRESH_START
-    s->InIsr = 0;
-    s->AllowInterrupt = 1;
-    s->ParityFail = 0;
-    s->Trap31A = s->Trap31B = s->Trap32 = 0;
-    for (int i = 1; i <= NUM_INTERRUPT_TYPES; i++) s->InterruptRequests[i] = 0;
-    s->InputChannel[005] = 0;
-    s->InputChannel[006] = 0;
-    s->InputChannel[010] = 0;
-    s->InputChannel[011] = 0;
-    s->InputChannel[012] = 0;
-    s->InputChannel[013] = 0;
-    s->InputChannel[014] = 0;
-    s->InputChannel[033] |= 002000;          // UPLINK TOO FAST
-    s->InputChannel[034] = 0;
-    s->InputChannel[035] = 0;
-    s->DownruptTimeValid = 0;
-    s->IndexValue = 0;
-    s->ExtraCode = 0;
-    s->SubstituteInstruction = 0;
-    s->PendFlag = 0;
-    s->PendDelay = 0;
-    s->TookBZF = 0;
-    s->TookBZMF = 0;
-    s->RestartLight = 1;
-    s->GeneratedWarning = 1;
-}
-
-static void rescue_stuck_job(agc_t *state)
-{
-    if (g_rescue_count >= MAX_RESCUES) return;
-    int newjob = state->Erasable[0][067] & 077777;
-    int swap_pending = (newjob != 0 && newjob != 077777);
-
-    if (swap_pending && newjob == g_last_newjob) {
-        g_stuck_count++;
-        if (g_stuck_count >= STUCK_THRESHOLD) {
-            simulate_gojam(state);
-            ESP_LOGI(PSTUB_TAG, "rescue_stuck_job #%d fired newjob=%06o",
-                     g_rescue_count + 1, newjob);
-            g_stuck_count = 0;
-            g_rescue_count++;
-        }
-    } else {
-        g_stuck_count = 0;
-    }
-    g_last_newjob = newjob;
-}
-
-// Detect any non-active slot sleeping at WAKESTAL CADR for too many
-// ticks. WAKESTAL = CADR INTSTALL+1 = 027415. A real INTSTALL waiter
-// gets woken by INTWAKE in the integration cycle's completion path.
-// In our build the cold-boot orphan never INTWAKE's, so V37's
-// INTSTALL parks forever. Fire one GOJAM per detected stuck sleeper —
-// SETINFL clears RASFLAG bits and the engine restarts cleanly; the
-// user (or test harness) re-issues V37E00E and it goes through.
-#define WAKESTAL_CADR        027415
-#define WAKESTAL_STUCK_TICKS 4      // ~64k cycles (~60ms sim time)
-#define MAX_WAKESTAL_RESCUES 12
-static int g_wakestal_ticks    = 0;
-static int g_wakestal_rescues  = 0;
-
-static void rescue_wakestal_sleeper(agc_t *s)
-{
-    if (g_wakestal_rescues >= MAX_WAKESTAL_RESCUES) return;
-    if (s->InIsr) return;
-
-    int found = 0;
-    // Scan all 8 slots including slot 0 (active). JOBSLEEP negates the
-    // priority of whatever slot the calling job ran in — that's often
-    // slot 0 (where V37's interpretive CALL INTSTALL lands).
-    for (int slot = 0; slot < 8; slot++) {
-        int base = 0154 + slot * 014;
-        int loc  = s->Erasable[0][base + 8]  & 077777;
-        int prio = s->Erasable[0][base + 11] & 077777;
-        if (prio == 077777) continue;          // empty slot
-        int sleeping = (prio & 040000) != 0;   // bit 14 = negated priority
-        if (sleeping && loc == WAKESTAL_CADR) { found = 1; break; }
-    }
-
-    if (found) {
-        g_wakestal_ticks++;
-        if (g_wakestal_ticks >= WAKESTAL_STUCK_TICKS) {
-            simulate_gojam(s);
-            ESP_LOGI(PSTUB_TAG, "rescue_wakestal_sleeper #%d fired",
-                     g_wakestal_rescues + 1);
-            g_wakestal_ticks = 0;
-            g_wakestal_rescues++;
-        }
-    } else {
-        g_wakestal_ticks = 0;
-    }
-}
-
-// Look for an unhandled CHARIN slot (PRIO=30110, LOC=02077,
-// BANKSET=60101). If found, an external keypress allocated CHARIN
-// but the executive can't dispatch it (1/ACCSET blocking, or a
-// stale priority-30 job from an earlier keypress is "active"). Free
-// any blocking active slot, then set up the engine to execute
-// CHARIN's first instruction directly.
-//
-// CHARIN entry per PINBALL_GAME__BUTTONS_AND_LIGHTS.agc:475:
-//   bank 040 (FBANK=030+SBANK), offset 02077, EBANK=1
-// In yaAGC: Z=02077 with FBANK=030 and ch7 bit 6 set selects bank 040.
-#define CHARIN_LOC      02077
-#define CHARIN_BANKSET  060101  /* FBANK=030, SBANK in bit 6, EBANK=1 */
-#define CHARIN_PRIORITY 030110
-
-// 1/ACCSET's signature: PRIO = 027110 (PRIO27 + work area offset 0110).
-// This is the specific deadlock we're rescuing. Don't intervene for any
-// other active job — let Luminary's normal dispatch handle them.
-#define STUCK_1_ACCSET_PRIO 027110
-
-static void dispatch_pending_charin(agc_t *s)
-{
-    if (s->InIsr) return;       // don't disturb interrupt processing
-
-    // Only intervene when the ACTIVE slot is the known-bad 1/ACCSET
-    // (PRIO=027110). Other legitimate running jobs must not be
-    // disturbed — that breaks normal verb-execution flow (e.g., V37
-    // sleeps in INTSTALL waiting for the user to type the program
-    // number; if we kill its slot, the program-change never completes).
-    int active_prio_check = s->Erasable[0][0167] & 077777;
-    if (active_prio_check != STUCK_1_ACCSET_PRIO) return;
-
-    // Look for a CHARIN slot (skip slot 0, which is the active set).
-    int charin_slot = -1;
-    for (int slot = 1; slot < 8; slot++) {
-        int base = 0154 + slot * 014;
-        int prio = s->Erasable[0][base + 11] & 077777;
-        int loc  = s->Erasable[0][base + 8]  & 077777;
-        int bset = s->Erasable[0][base + 9]  & 077777;
-        if (prio == CHARIN_PRIORITY && loc == CHARIN_LOC &&
-            bset == CHARIN_BANKSET) {
-            charin_slot = slot;
-            break;
-        }
-    }
-    if (charin_slot < 0) return;
-
-    // Free the stuck 1/ACCSET active slot.
-    s->Erasable[0][0167] = 077777;
-
-    // Manual CHANG2 swap: copy slot N's state to active.
-    int src = 0154 + charin_slot * 014;
-    for (int off = 0; off < 014; off++) {
-        s->Erasable[0][0154 + off] = s->Erasable[0][src + off];
-    }
-    // Free the source slot.
-    for (int off = 0; off < 014; off++) {
-        s->Erasable[0][src + off] = 0;
-    }
-    s->Erasable[0][src + 11] = 077777;
-
-    // Set engine state to start executing CHARIN's first instruction.
-    s->Erasable[0][5] = CHARIN_LOC;           // RegZ
-    s->Erasable[0][4] = 030 << 10;            // RegFB = FBANK 030
-    s->Erasable[0][6] = CHARIN_BANKSET;       // RegBB
-    s->Erasable[0][3] = 1;                    // RegEB = 1
-    s->OutputChannel7 |= 0100;                // superbank bit
-    s->Erasable[0][067] = 077777;             // NEWJOB cleared
-    ESP_LOGI(PSTUB_TAG, "dispatch_pending_charin fired (slot %d)", charin_slot);
-}
-
-// ============================================================================
-// Aggressive CHARIN force-dispatch (the actual cold-boot fix).
-//
-// Past sessions found that when the AGC is in its cold-boot deadlock,
-// KEYRUPT1 fires and NOVAC tries to allocate a CHARIN slot, but the
-// resulting slot has WRONG values: PRIORITY=00110 (missing CHRPRIO
-// contribution), LOC=0 (missing CHARIN entry), BANKSET=02077 (the
-// CHARIN low-half stored in the wrong cell). The slot never dispatches.
-//
-// Mechanism: when channel_router queues a keypress, it calls
-// peripheral_stub_on_keypress_posted() which arms a force-dispatch
-// timer. If the engine hasn't reached CHARIN code within FORCE_DISPATCH_
-// TICKS ChannelRoutine ticks (~50ms simulated), we manually set up the
-// engine to execute CHARIN with the correct entry point + bank state +
-// ch015 key code. This bypasses the broken NOVAC slot allocation.
-//
-// CHARIN reads ch015 directly (not from the slot), so as long as
-// channel_router_pump_input has written ch015 (which it does before
-// posting the IR5 KEYRUPT1 request), the key code is available.
-// ============================================================================
-#define FORCE_DISPATCH_TICKS  6      // ~50ms simulated (6 * 8191 cycles)
-#define MAX_FORCE_DISPATCHES  100    // generous cap; one per keypress
-
-static volatile int g_keypress_pending = 0;
-static volatile int g_keypress_ticks   = 0;
-static int          g_force_dispatches = 0;
-
-void peripheral_stub_on_keypress_posted(uint8_t code)
-{
-    (void)code;
-    g_keypress_pending = 1;
-    g_keypress_ticks = 0;
-}
-
-// Returns 1 if engine has recently been executing CHARIN code.
-// CHARIN is in bank 040 (FBANK=030, SUPERBANK bit set in ch7). Entry
-// point is offset 02077 but the routine extends several hundred words.
-// We accept Z in [02077, 02300] with the right bank state.
-static int engine_is_in_charin(agc_t *s)
-{
-    int z  = s->Erasable[0][5] & 077777;
-    int fb = (s->Erasable[0][4] >> 10) & 037;
-    int sb = (s->OutputChannel7 & 0100) != 0;
-    // FB=030 (decimal 24) + SUPERBANK → bank 040.
-    if (fb == 030 && sb && z >= 02000 && z <= 02400) return 1;
-    return 0;
-}
-
-static void force_dispatch_charin(agc_t *s)
-{
-    if (s->InIsr) return;
-    if (g_force_dispatches >= MAX_FORCE_DISPATCHES) return;
-
-    // If engine already in CHARIN code, the keypress dispatched normally.
-    if (engine_is_in_charin(s)) {
-        g_keypress_pending = 0;
-        g_keypress_ticks = 0;
-        return;
-    }
-
-    // CRITICAL: only force-dispatch when engine is stuck in cold-boot loop.
-    // If executive is idle (active slot priority == 077777) OR running a
-    // legitimate verb-in-progress (e.g. V37 waiting for noun, priority
-    // !=030110 and !=000110), trust KEYRUPT1 to dispatch normally.
-    // Force-dispatching during V37's noun-wait blows away its state and
-    // restarts CHARIN from scratch — user types "01E" but it gets treated
-    // as a fresh sequence and the noun never lands.
-    int active_prio = s->Erasable[0][0167] & 077777;
-    int cold_boot_stuck = (active_prio == 0030110 ||  // 1/ACCSET
-                          active_prio == 0027110 ||  // PINBALL stuck
-                          active_prio == 0000110);   // broken CHARIN slot
-    if (!cold_boot_stuck) {
-        // Engine is in normal scheduling — keypress should reach CHARIN
-        // through KEYRUPT1+NOVAC normally. Don't intervene.
-        g_keypress_pending = 0;
-        g_keypress_ticks = 0;
-        return;
-    }
-
-    g_keypress_ticks++;
-    if (g_keypress_ticks < FORCE_DISPATCH_TICKS) return;
-
-    // Mark the currently-active slot as completed (priority 077777 = empty).
-    // The cold-boot stuck job at slot 0 (1/ACCSET or PINBALL refresh) gets
-    // dropped — it was never going to terminate cleanly anyway. CHARIN
-    // calls TC ENDOFJOB when done, which calls NUCHANG2 to select next
-    // slot; if none, DUMMYJOB runs, which is fine.
-    s->Erasable[0][0167] = 077777;        // PRIORITY of active slot → empty
-
-    // Set engine registers to start CHARIN immediately.
-    s->Erasable[0][5] = CHARIN_LOC;       // RegZ ← 02077
-    s->Erasable[0][4] = 030 << 10;        // RegFB ← bank 030
-    s->Erasable[0][6] = CHARIN_BANKSET;   // RegBB ← FB=030 SBANK EB=1
-    s->Erasable[0][3] = 1;                // RegEB ← 1
-    s->OutputChannel7 |= 0100;            // SUPERBANK bit
-    s->Erasable[0][067] = 077777;         // NEWJOB cleared
-
-    // Clear interrupt state so the engine doesn't bounce back into KEYRUPT1.
-    s->InIsr = 0;
-    s->AllowInterrupt = 1;
-    s->InterruptRequests[5] = 0;          // KEYRUPT1 acknowledged
-
-    g_keypress_pending = 0;
-    g_keypress_ticks = 0;
-    g_force_dispatches++;
-    int ch15_val = s->InputChannel[015] & 077777;
-    ESP_LOGI(PSTUB_TAG, "force_dispatch_charin #%d fired (ch15=%05o dec=%d Z=%05o FB=%05o)",
-             g_force_dispatches, ch15_val, ch15_val,
-             s->Erasable[0][5] & 077777,
-             s->Erasable[0][4] & 077777);
-}
-
-#endif // !CONFIG_AGC_YAAGC_SOCKET — end of legacy rescue chain
-// ===========================================================================
 
 void peripheral_stub_tick(agc_t *state)
 {
@@ -859,13 +512,11 @@ void peripheral_stub_tick(agc_t *state)
         if (g_lm_ini_ticks_remaining > 0) {
             g_lm_ini_ticks_remaining--;
         } else {
-#ifdef CONFIG_AGC_YAAGC_SOCKET
-            // Route through the canonical mask+value SocketAPI drain.
-            // Five channels (ch016 + ch030..033), each as a mask packet
-            // followed by a value packet — identical to the bytes the
-            // Python driver sends to yaAGC.exe. This is the path that
-            // proved 5/5; direct WriteIO from outside ChannelInput
-            // (the legacy branch below) proved 0/5 in every host test.
+            // Route LM_INI through the canonical mask+value SocketAPI
+            // drain. Five channels (ch016 + ch030..033), each as a mask
+            // packet followed by a value packet — identical to the bytes
+            // the Python driver sends to yaAGC.exe. Direct WriteIO from
+            // outside ChannelInput proved 0/5 in every host test.
             extern int yaagc_socket_inject_packet(int, int, int);
             yaagc_socket_inject_packet(016, 0o00174, 1);
             yaagc_socket_inject_packet(016, 0,       0);
@@ -878,17 +529,6 @@ void peripheral_stub_tick(agc_t *state)
             yaagc_socket_inject_packet(033, 0o77776, 1);
             yaagc_socket_inject_packet(033, LM_SIM_CH033, 0);
             ESP_LOGI(PSTUB_TAG, "LM_INI via yaagc_socket (canonical mask+value flow)");
-#else
-            WriteIO(state, 030, LM_SIM_CH030);
-            WriteIO(state, 031, LM_SIM_CH031);
-            WriteIO(state, 032, LM_SIM_CH032);
-            WriteIO(state, 033, LM_SIM_CH033);
-            ESP_LOGI(PSTUB_TAG, "LM_INI deferred-fire: ch030=%05o ch031=%05o ch032=%05o ch033=%05o",
-                     state->InputChannel[030] & 077777,
-                     state->InputChannel[031] & 077777,
-                     state->InputChannel[032] & 077777,
-                     state->InputChannel[033] & 077777);
-#endif
             g_lm_ini_pending = 0;
         }
     }
@@ -900,10 +540,9 @@ void peripheral_stub_tick(agc_t *state)
     // cycle count as μs) which under-integrated attitude by 12x.
     peripheral_stub_step(state, 96000);
 
-    // Periodic diagnostic — dump engine scheduling state. The rescues
-    // below trigger on specific newjob / slot-loc / active-prio
-    // conditions; if they never fire, this log tells us what state the
-    // engine is actually IN so we can tune the triggers.
+    // Periodic diagnostic — dump engine scheduling state so a hang
+    // shows up in the serial log even when the canonical drain stays
+    // quiet. Cheap (one ESP_LOGI/sec on hardware).
     static int g_diag_tick = 0;
     if ((++g_diag_tick % 10) == 0) {   // every 10 calls ≈ 1 sec on ESP32
         int newjob = state->Erasable[0][067] & 077777;
@@ -922,61 +561,4 @@ void peripheral_stub_tick(agc_t *state)
         ESP_LOGI(PSTUB_TAG, "tick%d Z=%05o newjob=%06o active=p%06o@%06o wakestal=%d",
                  g_diag_tick, z, newjob, active_prio, active_loc, wakestal_slot);
     }
-
-#ifndef CONFIG_AGC_YAAGC_SOCKET
-    // ---- Legacy rescue chain ----
-    // These hacks papered over the in-process-driver bug that
-    // CONFIG_AGC_YAAGC_SOCKET fixes structurally. They are kept ONLY
-    // for builds that haven't moved to the canonical socket path yet
-    // (host Layer-2 tests, primarily). When CONFIG_AGC_YAAGC_SOCKET=y
-    // (now the firmware default), the canonical mask+value drain
-    // inside ChannelInput handles CHARIN dispatch / job swaps / etc
-    // the way yaAGC.exe does — no rescues needed.
-    //
-    //   rescue_stuck_job: NEWJOB pending but executive can't swap
-    //   rescue_wakestal_sleeper: slot parked in WAKESTAL forever
-    //   dispatch_pending_charin: 1/ACCSET pinned, CHARIN slot waiting
-    //   rescue_stuck_z (below): generic Z-pin detector for tight loops
-    rescue_stuck_job(state);
-    rescue_wakestal_sleeper(state);
-    dispatch_pending_charin(state);
-    if (g_keypress_pending) force_dispatch_charin(state);
-#endif
-
-    // Generic "active job stuck at same Z" rescue. Hardware monitor
-    // shows the engine bouncing forever in tight loops with an active
-    // job (typically CHARIN at p030110) and no NEWJOB swap pending —
-    // so neither rescue_stuck_job (needs NEWJOB) nor the specific
-    // dispatch_pending_charin (needs 1/ACCSET active) ever fire.
-    //
-    // Trigger: same Z address (within a small tolerance) for K
-    // consecutive ChannelRoutine ticks AND active slot is occupied.
-    // K=4 ticks ≈ 3 sec on ESP32 ≈ 32K simulated cycles. A healthy
-    // engine moves Z hundreds-of-thousands of distinct addresses per
-    // second; if it's pinned to ONE Z for 3 sec, it's stuck.
-#ifndef CONFIG_AGC_YAAGC_SOCKET
-    static int g_stuck_z_count = 0;
-    static int g_stuck_z_last = 0;
-    static int g_stuck_z_rescues = 0;
-    int z_check = state->Erasable[0][5] & 077777;
-    int prio_check = state->Erasable[0][0167] & 077777;
-    int job_active = (prio_check != 077777 && prio_check != 0);
-    // Compare with a 16-address tolerance: tight interpretive loops
-    // bounce a few sequential Z values, but stay in a small range.
-    int z_delta = z_check - g_stuck_z_last;
-    if (z_delta < 0) z_delta = -z_delta;
-    if (job_active && z_delta < 16) {
-        g_stuck_z_count++;
-        if (g_stuck_z_count >= 4 && g_stuck_z_rescues < 8) {
-            simulate_gojam(state);
-            ESP_LOGI(PSTUB_TAG, "rescue_stuck_z #%d fired (Z=%05o prio=%06o)",
-                     g_stuck_z_rescues + 1, z_check, prio_check);
-            g_stuck_z_rescues++;
-            g_stuck_z_count = 0;
-        }
-    } else {
-        g_stuck_z_count = 0;
-    }
-    g_stuck_z_last = z_check;
-#endif
 }
