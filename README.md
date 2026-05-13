@@ -1,340 +1,279 @@
-# espAGC — Apollo Guidance Computer on the Cheap Yellow Display (ESP32-2432S028)
+# espAGC
 
-A self-contained Apollo Guidance Computer running on the ESP32-WROOM-32 inside an [ESP32-2432S028 "Cheap Yellow Display"](https://github.com/witnessmenow/ESP32-Cheap-Yellow-Display) (the canonical 2.8" CYD with resistive XPT2046 touch). The board becomes a self-contained DSKY — controlled from a 320×240 on-screen 19-key touch keypad, *and* the existing WiFi web UI. Both **Luminary 099 (LM)** and **Comanche 055 (CSM)** mission ROMs are assembled at build time from the original AGC sources in [virtualagc/virtualagc](https://github.com/virtualagc/virtualagc) via yaYUL, and embedded directly in the firmware.
+**An Apollo Guidance Computer running on a $7 dev board.**
 
-The emulator core is yaAGC. License is **GPL v2** (carries through from yaAGC).
+A self-contained AGC simulator on the ESP32-WROOM-32 inside the [ESP32-2432S028 "Cheap Yellow Display"](https://github.com/witnessmenow/ESP32-Cheap-Yellow-Display) — the canonical 2.8″ CYD with 320×240 ST7789 and XPT2046 resistive touch. The board boots straight into a working DSKY: touch-keypad on the screen, web DSKY on its WiFi IP, and a canonical 4-byte protocol TCP listener on port 19850 so it shows up as a drop-in [yaAGC](https://github.com/virtualagc/virtualagc) node to anything that already talks to one.
 
-## Status
+Both **Luminary 099 (LM)** and **Comanche 055 (CSM)** mission ropes are reassembled at build time from the original AGC source in [virtualagc/virtualagc](https://github.com/virtualagc/virtualagc) via host yaYUL and embedded directly in the firmware. License is **GPL v2** (carries through from yaAGC).
 
-| Layer | Status | Notes |
+> The engine is the real yaAGC engine. The ropes are the real Luminary 099 / Comanche 055 ropes. The DSKY behaviour is the real DSKY behaviour. The only thing simulated is the spacecraft attached to it — and even that runs through the same channel-I/O protocol the real LM_Simulator on Pi/Linux uses.
+
+---
+
+## Quick start
+
+1. Grab the prebuilt firmware from [the latest release](https://github.com/zombodotcom/espAGC/releases/latest):
+   ```
+   espAGC-v0.1.0-merged.bin
+   ```
+2. Flash it (single image at offset 0x0, no IDF setup required):
+   ```
+   python -m esptool --chip esp32 --port COM<n> -b 460800 write-flash 0x0 espAGC-v0.1.0-merged.bin
+   ```
+3. Connect a serial monitor at 115200 baud and watch it boot. After ~3 s you'll see something like:
+   ```
+   I (1330) yaagc_sock: listening on 0.0.0.0:19850
+   I (1410) app: espAGC running
+   I (2910) wifi_input: got ip: 192.168.1.23 — web DSKY at http://192.168.1.23/
+   ```
+4. Open the web DSKY at `http://<device-ip>/`, tap **Lamp test (V35E)**, watch the LCD and the browser DSKY light up in lockstep.
+
+If WiFi can't reach your network, the firmware falls back to a SoftAP called `espAGC` at `192.168.4.1`.
+
+---
+
+## What works
+
+| Feature | Status | How to try it |
 |---|---|---|
-| Layer 1 — pure-logic host tests | **4/4 PASS** | ROM loader, engine boot, channel-10 DSKY emit, keypad hit-test |
-| Layer 2a — engine + real channel_router | **12/12 PASS** | Boot alarm dump, P00 select, lamp test, RSET clears, Apollo 11 transcript replay, auto-RSET, IMODES, FAILREG, idle quiet, executive state, CHARIN dispatch |
-| Layer 2b — renderer pixel tests | **2/2 PASS** | Blank frame FNV-1a hash, region assertions for lit PROG/VERB/NOUN cells |
-| Layer 2c — canonical yaAGC socket port | **5/5 PASS** ✅ | `test_yaagc_socket_host` + `yaagc_socket_reliability.py` drives our build via canonical 4-byte protocol over TCP and reaches PRG=00 (ch010=55265) on V36E V37E 00E V37E 00E — matches yaAGC.exe baseline exactly. `test_yaagc_socket_local` does the same via the synthetic-client inject path (no TCP) and also passes. |
-| Layer 3 — QEMU | **available** | Espressif's `qemu-xtensa` (9.2.2) supports `-machine esp32`. `idf.py qemu monitor` runs the firmware. WiFi radio not emulated; everything else (engine, peripheral_stub, channel_router, display_hal) runs. |
-| Layer 4 — hardware | **boots, engine runs, V37 programs transition correctly** ✅ | With `CONFIG_AGC_YAAGC_SOCKET=y`: cold boot → WiFi associates → deferred LM_INI fires via canonical mask+value flow. V37E63E reaches **`active=p044322@021301`** (P63 SERVICER scheduled and running). V05N09 displays alarms. The Apollo 11 landing transcript sequence walks PDI → 1201/1202 PRO acks → V16N68 → P66 → touchdown. PROG/VERB/NOUN render on both LCD and web DSKY. P63's R1/R2/R3 stay blank until PIPA/LR pulse injection lands (see "Descent thrust" below — foundation in place, full landing simulation is multi-session work). |
+| **V35E lamp test** | ✅ | Tap the canned sequence — all 12 indicators + every 7-seg digit light up |
+| **V37E nn E program select** | ✅ | P00 idle, P01 prelaunch, P63 landing braking, P66 manual hover, P68 confirm |
+| **V16N36E display GET** | ✅ | R1 ticks up with mission elapsed time |
+| **V05N09E display alarm** | ✅ | R1 shows latest program-alarm code |
+| **V16N63E P63 monitor** | ✅ | VERB/NOUN render, COMP ACTY flashes during guidance cycles |
+| **V16N68E landing analog** | ✅ | Display fields paint; numerics need state-vector init (see below) |
+| **Apollo 11 landing transcript** | ✅ | One-click replay of Armstrong/Aldrin's PDI keystroke timeline |
+| **PRG=00 (ch010 = 055265)** | ✅ 5/5 | Canonical socket reliability test passes against the device |
+| **Comanche 055 (CSM rope)** | ✅ boots | Hold the BOOT button at reset — DSKY comes up in CM mode |
+| **Touch / web / serial / TCP keypresses** | ✅ | All four input paths feed the same canonical drain |
+| **Descent thrust simulator** | ⚠️ wired, foundation only | Fires PIPA + LR pulses; displays need state-vector init to read them |
+| **Realistic ALT / HDOT / TTOGO in P63** | ❌ | Needs initial state vector at PDI — next release |
 
-### Descent simulation (foundation for full landing)
+---
 
-The web DSKY's "Start descent thrust" button (or `POST /thrust 1`)
-arms `peripheral_stub`'s descent driver:
+## How to drive it
 
-- **PIPAZ pulses** at ~52 Hz through `UnprogrammedIncrement` —
-  models DPS engine thrust along body +Z, integrated by SERVICER
-  into sensed velocity.
-- **RNRAD pulses** representing landing-radar range — starts at
-  50 000 ft, ticks down at 300 ft/s, fires one pulse per 9.38 ft of
-  descent through the same canonical drain. Resets every time the
-  button toggles back on.
+Four input paths, all converging on the same canonical mask+value drain inside `ChannelInput`:
 
-Realistic R1/R2/R3 in V06N63 / V16N68 still require an uplinked
-initial state vector at PDI — `peripheral_stub` doesn't pretend to
-have that. PIPAs + LR exercise the relevant pulse mechanisms so
-the next session (state-vector init via ch0173 UPRUPT or a typed
-V21N02 sequence) can complete the loop.
+### 1. Touch screen
+Tap the on-screen 19-key DSKY. The keypad is positioned along the right side of the panel; the rest of the screen shows the live DSKY display.
 
-### Legacy rescue chain (removed from canonical path)
+### 2. Web DSKY (`http://<device-ip>/`)
+Full 19-button keypad, live mirror of the LCD (PROG / VERB / NOUN / R1 / R2 / R3 + all 12 status lamps polled at 5 Hz), physical-keyboard shortcuts (`V` `N` `+` `-` `E` `C` `P` `R` `K` digits), and a one-click menu of canned sequences plus the descent-thrust toggle.
 
-`peripheral_stub_tick` used to call `rescue_stuck_job`,
-`rescue_wakestal_sleeper`, `dispatch_pending_charin`,
-`force_dispatch_charin`, and `rescue_stuck_z` to paper over the
-in-process-driver bug. With `CONFIG_AGC_YAAGC_SOCKET=y` (now the
-firmware default) the canonical drain handles these conditions
-correctly, so the calls are gated behind `#ifndef
-CONFIG_AGC_YAAGC_SOCKET`. They still exist for host Layer-2 tests
-that compile without the flag (those tests use the legacy path and
-remain at PASS).
+### 3. Serial console (UART0)
+`idf.py monitor` exposes a real TTY. Type letters into the monitor — same map as the web: `V` `N` `+` `-` `E` `C` `P` `R` `K` `0`–`9`.
 
-### What changed (2026-05-13)
+### 4. Canonical TCP protocol on port 19850
+Anything that speaks the [yaAGC 4-byte protocol](https://www.ibiblio.org/apollo/developer.html) can drive the engine remotely. The reference Python driver works without modification:
 
-The hardware-display blank was a **driver-loop bug**, not a Luminary issue. Every in-process port of yaAGC's main loop we tried failed V37E00E×2 with the same deterministic state, but yaAGC.exe + Python socket driver passed 5/5. Bisection ruled out our integration features, our SimExecute port, our pacing, and per-channel value differences in LM_INI.
+```bash
+py tests/host/hardware_reliability_test.py 192.168.1.23:19850
+```
 
-The fix is a port of canonical `SocketAPI.c` + `agc_utilities.c` into `components/yaagc_socket/`, gated by `CONFIG_AGC_YAAGC_SOCKET` (default off). When on:
+That's the same protocol yaDSKY2, LM_Simulator, and `windows_yaagc_test.py` use. The board appears to those peers as if it were yaAGC.exe running on a workstation.
 
-- ESP32 listens on TCP `:19850` speaking the canonical 4-byte protocol.
-- `io_callbacks.c::ChannelInput/Output/Routine` forward to the socket layer.
-- LCD / touch / web keypresses route through `channel_router_post_key → yaagc_socket_inject_key → canonical drain` (synthetic local client; slot 0 reserved).
-- `peripheral_stub_init` fires LM_INI through `yaagc_socket_inject_packet` with canonical masks (`077777` / `077776` / `000174`) — same byte stream the Python driver sends to yaAGC.exe.
+---
 
-Flip on with `idf.py menuconfig` → "espAGC canonical yaAGC socket (Task #18)" → enable. Default-off keeps the legacy channel_router path unchanged. Existing host Layer-2 tests still pass.
+## Tutorial: Apollo 11 landing transcript
 
-DSKY output renders as a 320×240 framebuffer on the ST7789 panel — status panel, register window, and an on-screen 19-key keypad backed by the XPT2046 resistive touchscreen. No LVGL — direct framebuffer in 80-row strips, three passes per frame.
+Click **Apollo 11 landing transcript** in the web DSKY's canned sequences. The runner replays Armstrong and Aldrin's actual DSKY keystrokes from the [Apollo 11 Lunar Surface Journal](https://www.hq.nasa.gov/alsj/a11/a11.landing.html), paced at 250 ms per key (compressed from the real ~12-minute descent):
 
-## How V35E works — the cold-boot recovery (host build)
+| Phase | Keystrokes | What happens |
+|---|---|---|
+| Reset to clean state | `RSET` | Clears RESTART / OPR ERR / pending verb entry |
+| **PDI** (Powered Descent Initiation) | `V 3 7 E 6 3 E` | Selects P63 — Lunar Landing Approach. `active_prio` flips to `p044322@021301` |
+| **1201 / 1202 alarms** | `PRO PRO PRO PRO PRO` | The famous five PROCEEDs — Armstrong's "Program alarm!" / Houston's "We're GO on that alarm." Real alarms were rendezvous-radar BBANK leakage; we don't model them, but the historical PROs are part of the sequence |
+| **LR monitor** | `V 1 6 N 6 8 E` | V06N68 "LANDING ANALOG DISPLAYS" — LR-alt / forward velocity / altitude rate |
+| **Manual ROD** | `V 3 7 E 6 6 E` | P66 manual hover. `+` slows descent 1 ft/s per press, `-` speeds up |
+| Armstrong over boulders | `+ + + +` | Armstrong commanded 4 ft/s slower descent over the West Crater boulder field |
+| Picking up sink rate | `- -` | After clearing the field |
+| **Touchdown** | `V 3 7 E 6 8 E PRO` | P68 Lunar Landing Confirmation. PRO confirms |
+| Post-landing | `V 0 6 N 4 3 E` | Surface position display |
 
-Cold-boot Luminary099 on yaAGC has a documented deadlock without a `--resume` core-dump file or a connected LM_Simulator socket peer. 1/ACCSET (PRIO=27110, allocated by DAPIDLER's first T5RUPT) executes interpretive code that gets caught in `INTERPRETER.agc:681` GOTO indirection — POLISH=0 dereferencing zero scratch storage indefinitely. Block II AGC is non-preemptive, so CHARIN (allocated on keypress) can never take CPU. Vanilla yaAGC has the same problem (verified via `yaagc_ref` and `test_ref_v37_slots` — see [HANDOFF.md](HANDOFF.md)).
+Watch the LCD and the web DSKY together — the PROG indicator transitions 00 → 63 → 66 → 68, COMP ACTY blinks during guidance cycles, and the VERB/NOUN flash during data prompts.
 
-`peripheral_stub_tick` (in `components/peripheral_stub/peripheral_stub.c`) provides multi-stage recovery on the **host build**:
+---
 
-1. **GOJAM-rescue.** When NEWJOB stays the same across consecutive ticks (executive wants to swap but can't), trigger a simulated GOJAM matching `agc_engine.c:2246-2298`.
+## Tutorial: Descent thrust simulator
 
-2. **CHARIN dispatch injection.** Each tick, scan the 7 inactive job slots for one matching CHARIN's signature (PRIO=30110, LOC=02077, BANKSET=060101). If found and the active slot is the stuck 1/ACCSET (027110), manually copy the CHARIN slot's state into the active set (software CHANG2), and set RegZ/FBANK/EBANK/SBANK so the engine starts executing CHARIN's first instruction.
+The web DSKY has a **Start descent thrust** button below the canned sequences. It's a foundation, not the full ride — here's what it actually does and what's missing.
 
-3. **Stuck-Z rescue.** When the active job pins Z within a 16-address window for 4+ ChannelRoutine ticks, force GOJAM. Generic catch-all for interpretive-loop deadlocks.
+### What it does
 
-4. **WAKESTAL rescue.** When a slot parks at INTSTALL's CADR (027414/027415) for 4+ ticks, force GOJAM. Handles V37's INTSTALL JOBSLEEP path.
+When you click **Start descent thrust**, `peripheral_stub` flips a flag and the periodic tick starts injecting two pulse streams through the canonical drain (same path TCP peers use, same path the real LM_Simulator on Pi/Linux uses):
 
-Result on host: V35 LAMP TEST runs the full sequence — `make run` → ALL PASS confirms via `test_v35e_full`.
+- **PIPAZ at ~52 Hz** — Pulsed Integrating Pendulous Accelerometer Z-axis. Each pulse represents 5.85 cm/s of sensed deceleration. 52 pulses/sec ≈ 10 ft/s² thrust, which is the LM Descent Propulsion System's nominal braking acceleration. These go into counter 041 (`PIPAZ`) via `UnprogrammedIncrement`.
+- **RNRAD pulses representing landing-radar range** — starts at 50 000 ft (a few seconds before high-gate), ticks down at 300 ft/s, one pulse per 9.38 ft. These go into counter 046 (`RNRAD`).
 
-**ESP32 hardware status: rescues fire but display still stays blank.** Cold-boot trips NW alarm (FAILREG[0]=01107), engine cycles between stuck states until alarms settle and slot 0 ends up empty. See [HANDOFF.md](HANDOFF.md) for current debugging and next steps. The dual-core layout (agc_task on APP_CPU, ui_task on PRO_CPU) is in place but the display work isn't done yet.
+Toggling the button OFF and ON resets the LR range to 50 000 ft so you can re-run the descent without rebooting.
 
-## Boot behavior — the PROG ALARM caveat
+### How to try it end-to-end
 
-A fresh Luminary 099 boot leaves **PROG ALARM**, **RESTART**, and the **NightWatchman** watchdog all asserted. This is canonical Block II AGC fresh-start behavior — the astronaut is supposed to acknowledge with **RSET**.
+1. Click **P63 landing (V37E63E)** to set MODREG = 63.
+2. Type `V 1 6 N 6 3 E` (or click the sequence) so the DSKY is asked to display P63's "altitude / altitude rate / time-to-go" autodisplay.
+3. Click **Start descent thrust**.
+4. Watch `COMP ACTY` (the green dot on the web mirror, top-left of the lamp panel) start flashing — Luminary's SERVICER cycle is now picking up PIPA pulses every 2 s.
 
-After RSET:
-- **RESTART clears.** The hardware-direct flip-flop in `agc_engine.c` (`State->RestartLight = 0` when ch015 is written with keycode 022) fires correctly.
-- **PROG ALARM stays lit.** Luminary's RSET handler (`PINBALL_GAME__BUTTONS_AND_LIGHTS.agc::ERROR`) clears `DSPTAB +11D` *and* the fault bits in `IMODES30`/`IMODES33` — but the comment right there reads *"IF THE FAILURE STILL EXISTS, THE ALARM WILL COME BACK."* Luminary still sees missing peripherals (no IMU CDU counters, no radar data, no AOT marks), re-asserts the fault bits, and re-asserts PROG ALARM.
+### What you'll see — be set up to be honest with reality
 
-Solving this end-to-end requires a peripheral stub task — see `docs/SESSION_NOTES.md` for the current investigation and what's next.
+You'll **see** PROG = 63, VERB = 16, NOUN = 63, and COMP ACTY blinking — proof the engine is integrating the pulse stream. You **won't** see realistic altitude in R1, descent rate in R2, or time-to-go in R3. They'll stay at `+00000`.
 
-## Layout
+That's because Apollo P63's altitude / velocity output is `f(initial state vector, integrated PIPA deltas, LR corrections)`. Without an initial state vector (R₀, V₀) loaded at the moment of PDI, the integrator starts at zero and stays there — pulses are accumulated against a zero baseline, so what the AGC computes as "altitude" is just `0 + integrated noise`.
+
+On the actual Apollo 11 mission, the state vector was **uplinked from Mission Control** in the minutes before PDI via the canonical [DIGITAL UPLINK](https://github.com/virtualagc/virtualagc/blob/master/Luminary099/DIGITAL_UPLINK.agc) protocol on channel `0o173`. Crew could also load it manually via a long V21/V22 type-in sequence with octal digits from the PAD.
+
+We don't do either yet. That's the next release. The pulse plumbing on this side is correct — verified by watching PIPAZ pulses arrive via the canonical drain — but the initial conditions to make the integration meaningful are missing. Honest progress, not theatre.
+
+### What "stop descent thrust" does
+
+Stops the pulse stream. The accumulated PIPA velocity and the RNRAD range counter stay where they were — Luminary will keep computing against the existing state. Click **Start** again and the LR range resets to 50 000 ft for a fresh run.
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ touch_input   web POST /key   serial UART   TCP :19850          │
+│      │              │             │             │               │
+│      └──────────────┴──────┬──────┴─────────────┘               │
+│                            ▼                                    │
+│        channel_router_post_key / inject_packet                  │
+│                            │                                    │
+│                            ▼                                    │
+│         ┌────── components/yaagc_socket ──────┐                 │
+│         │   synthetic-client byte ring        │                 │
+│         │   + canonical mask+value drain      │                 │
+│         │   + SocketInterlace=50 throttle     │                 │
+│         └─────────────────┬───────────────────┘                 │
+│                           ▼                                     │
+│         agc_engine (real yaAGC) — ChannelInput per cycle        │
+│                           │                                     │
+│                           ▼                                     │
+│              ChannelOutput                                      │
+│              ├─ channel_router_on_output → LCD + web mirror     │
+│              ├─ peripheral_stub_on_output → IMU/RCS sim         │
+│              └─ yaagc_socket broadcast → connected TCP peers    │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+The load-bearing realisation: **canonical yaAGC drives WriteIO from *inside* ChannelInput, called once per cycle by agc_engine. The mask-and-value packet flow, the SocketInterlace=50 throttle, and the per-cycle drain order are all load-bearing.** Every in-process port of the main loop we tried before this insight failed V37E00E×2 with the same deterministic state, while yaAGC.exe + Python socket driver passed 5/5. Porting `SocketAPI.c` verbatim — adapted for lwIP / ws2_32 / POSIX — captures all three at once. See `components/yaagc_socket/yaagc_socket.c`.
+
+### Component layout
 
 ```
 components/
-  agc_core/          yaAGC engine wrapper. Cherry-picks engine sources
-                     from third_party/virtualagc/yaAGC, replaces
-                     SocketAPI.c with io_callbacks.c and agc_engine_init.c
-                     with a memory-loading agc_init.c. Initializes ch030
-                     to 037777 (matches upstream yaAGC default — all
-                     signals de-asserted, "IMU not yet operating").
+  agc_core/          yaAGC engine wrapper. Cherry-picks engine sources from
+                     third_party/virtualagc/yaAGC. agc_init.c loads ROMs
+                     from flash instead of stdio.
   apollo_rom/        Runs host yaYUL on virtualagc's Luminary099 / Comanche055
-                     mission trees at configure time, embeds the binaries
-                     via EMBED_FILES.
-  channel_router/    AGC IO channels <-> a dsky_state_t snapshot, with a
-                     lock-free input ringbuffer for keystrokes. Routes
-                     ch015 keypresses through agc_engine.c::WriteIO so
-                     the RSET-clears-RESTART hardware path fires.
-  display_hal/       320x240 DSKY renderer. ST7789 panel driver,
-                     dsky_layout_320x240, framebuffer rendered in
-                     three 80-row strips.
-  touch_input/       XPT2046 resistive driver + 50 Hz poll task that
-                     posts decoded keys via channel_router_post_key.
-  dsky_input/        WiFi (HTTP POST /key) transport feeding channel_router.
-  led_status/        3-GPIO RGB LED driver (active-low) for the CYD's
-                     onboard status LED.
-  sequences/         Canned DSKY key sequences (lamp test, P00 select,
-                     V16N36 time, V05N09, RSET) exposed via the web UI.
+                     mission trees at configure time, embeds via EMBED_FILES.
+  channel_router/    Engine channel-I/O ↔ dsky_state_t snapshot. Always
+                     drives the LCD/web mirror; routes keys through
+                     yaagc_socket_inject_key when the canonical flag is on.
+  yaagc_socket/      The canonical SocketAPI port (this release's headline).
+                     ChannelInput / ChannelOutput / ChannelRoutine matching
+                     yaAGC line-for-line, lwIP BSD sockets, 4-client slot
+                     table with slot 0 reserved as the local synthetic client.
+  peripheral_stub/   Port of LM_Simulator behaviour: deferred LM_INI through
+                     canonical mask+value flow, attitude integration with
+                     PCDU/MCDU pulse generation, PIPAZ + RNRAD descent
+                     pulse drivers.
+  display_hal/       320×240 DSKY renderer. ST7789 panel driver, framebuffer
+                     rendered in three 80-row strips, no LVGL.
+  touch_input/       XPT2046 resistive driver + 50 Hz poll task.
+  dsky_input/        WiFi STA/AP setup + HTTPD serving the web DSKY.
+  sequences/         Canned DSKY key sequences (lamp test, P00, P63, Apollo
+                     11 landing transcript, etc.) exposed via POST /seq.
+  led_status/        3-GPIO RGB status LED driver.
 boards/
-  board_cyd_2432s028/  Pin map + factory functions returning panel,
-                       touch, and LED ifaces.
-main/                app_main.c — boot sequence + task spawn.
-tests/host/          Three-layer host gcc test harness. ~2 s total.
-tools/
-  build_yayul.cmake     ExternalProject for host yaYUL.
-  yayul_host_project/   Top-level CMakeLists wrapper for yaYUL.
-  assemble_rom.cmake    Custom command runner: yaYUL MAIN.agc -> bank-ordered .bin.
-third_party/         Submodules: virtualagc, Apollo-11, CYD-reference, T-Dongle-C5.
+  board_cyd_2432s028/  Pin map + factory functions returning panel/touch/LED.
+main/                  app_main.c — boot sequence + task spawn.
+tests/host/            Three-layer host gcc test harness (~ a few seconds).
+tools/                 yaYUL host build, yaAGC Windows stubs, QEMU drivers.
+third_party/           Submodules: virtualagc, Apollo-11.
 ```
 
-## Build & flash
+---
 
-Requires **ESP-IDF v6.0+** and a host C compiler (MinGW-w64 on Windows; gcc/clang on Linux/macOS) for yaYUL.
+## Building from source
+
+Requires **ESP-IDF v6.0+** and a host C compiler (MinGW-w64 on Windows, gcc/clang on Linux/macOS) for the yaYUL pass that assembles the ropes.
 
 ```powershell
 git clone --recurse-submodules https://github.com/zombodotcom/espAGC.git
 cd espAGC
 
-# activate IDF (path may differ)
-. C:\esp\v6.0.1\esp-idf\export.ps1
+. C:\esp\v6.0.1\esp-idf\export.ps1            # or whichever path
 
 idf.py set-target esp32
-idf.py build       # ~2 min cold (host yaYUL build + LM/CSM assembly)
+idf.py build                                  # ~2 min cold (host yaYUL + LM/CSM assembly)
 idf.py -p COM<n> flash monitor
 ```
 
-On boot you'll see something like:
+`CONFIG_AGC_YAAGC_SOCKET=y` is the default. The canonical-socket path is the supported path.
 
-```
-I (1507) app: loading ROM Luminary099 (73728 bytes)
-I (2227) wifi_input: WiFi AP 'espAGC' up; web DSKY at http://192.168.4.1/
-I (2300) st7789: ST7789 ready: 320x240 landscape
-I (2301) dsky:    display_hal up: 320x240, strip_h=80
-I (2305) xpt2046: XPT2046 ready (sck=25 mosi=32 miso=39 cs=33 irq=36)
-I (2306) touch:   touch_input task up
-```
+### QEMU (no hardware needed)
 
-Hold the boot button at reset to switch ROM to Comanche055.
-
-### DSKY input
-
-- **Touchscreen**: tap the on-screen 19-key keypad. Same key set as the WiFi web UI.
-- **WiFi web UI**: connect to the network configured in `idf.py menuconfig` → espAGC WiFi (or to the open AP `espAGC` if no SSID is set), browse to `http://<dongle-ip>/` (or `http://192.168.4.1/` in SoftAP mode). SPA has a **DSKY display mirror** (PROG/VERB/NOUN, R1/R2/R3, all 12 status lamps — exactly the same fields the ST7789 LCD shows, polled from `/state` at 5 Hz), a 19-button DSKY keypad, physical-keyboard shortcuts, and a one-click menu of canned sequences (lamp test, P00 select, RSET, etc.).
-
-### What verbs work — try these first
-
-| Sequence | Type | What you'll see |
-|---|---|---|
-| **V35E** (lamp test) | host ✅ / hardware ⚠️ | **Host**: `test_v35e_full` shows VRB=35 after digits then [8,8][8,8][8,8] after E (all digits + lamps). **Hardware**: keypress reaches CHARIN but DSKY display stays blank — see [HANDOFF.md](HANDOFF.md) |
-| **R** (RSET) | host ✅ | Clears RESTART lamp on host. RestartLight stays lit on hardware due to repeated cold-boot NW alarms |
-| **V37E00E** (select P00) | host partial ⚠️ | `verify-ref` exits 2 (PARTIAL OK): channel-value subsets match WSL ground truth but PRG=00 (ch010=55265) doesn't emit. V37's NEWMODE/MMCHANG transition crashes the engine on the second ENTR (slot saves with wrong BANKSET). `test_ref_v37_slots` confirms this is upstream-yaAGC cycle-driven-mode behavior, not our integration. Hardware doesn't reach PRG=00 either. |
-
-V35E is the headline demo — it exercises CHARIN dispatch, lamp test verb 35, ch010 row-by-row digit + lamp output, and the full DSKY render pipeline end-to-end.
-
-### Diagnostic tests (run on host without hardware)
+Espressif's `qemu-xtensa` fork (≥ 9.2) supports `-machine esp32` — the exact SoC in the WROOM-32. Install once:
 
 ```powershell
-cd tests\host
-mingw32-make diag                       # build all diagnostic binaries
-ROM=../../build/roms/Luminary099.bin ./test_v35e_full.exe         # step-by-step V35E
-ROM=../../build/roms/Luminary099.bin ./test_charin_dispatch.exe   # CHARIN slot allocation
-ROM=../../build/roms/Luminary099.bin ./test_v37_slots.exe         # V37 sequence + slot dump
-ROM=../../build/roms/Luminary099.bin ./yaagc_ref.exe              # vanilla yaAGC baseline
-```
+python $env:IDF_PATH\tools\idf_tools.py install qemu-xtensa
+. C:\esp\v6.0.1\esp-idf\export.ps1            # re-source so PATH picks up qemu
 
-#### State-comparison + slot-write tracing (V37E00E investigation)
-
-```powershell
-cd tests\host
-mingw32-make test_state_compare.exe test_slot_writes.exe
-
-# Capture 25 per-second core dumps of host's V36E V37E 00E V37E 00E run
-ROM=../../build/roms/Luminary099.bin DUMPDIR=wsl_dumps/host_v37 ./test_state_compare.exe
-
-# Diff against committed WSL ground-truth at wsl_dumps/ref/
-py compare_dumps.py host_v37 ref                              # high-level summary
-py parse_core_dump.py wsl_dumps/host_v37/core.018 wsl_dumps/ref/core.019 --diff
-
-# Step the engine one instruction at a time and log every write to slot-0
-# (E[0][0164..0167]). Pinpoints exactly which Z address writes the corrupt
-# PRIORITY=030401 / LOC=02146 that causes the V37E00E×2 crash to Z=0.
-ROM=../../build/roms/Luminary099.bin ./test_slot_writes.exe   # writes slot_writes.log
-grep "Z=02751 " slot_writes.log | head                        # the smoking gun
-```
-
-Pre-captured WSL reference dumps (`wsl_dumps/ref/core.000..026`) are committed; re-capture via `bash capture_with_dumps.sh` from inside WSL when the upstream behavior needs refreshing. PRG=00 emits in ref `core.022` (`OutputChannel10[11]=55265`); host never reaches that state — see [HANDOFF.md](HANDOFF.md) and `~/.claude/projects/.../memory/project_v37_slot_corruption_diagnosed.md` for the current diagnosis.
-
-### QEMU — emulate the WROOM-32 firmware locally
-
-Iterating on `peripheral_stub.c` / `channel_router.c` / `agc_init.c` without burning the flash → COM7 monitor cycle:
-
-```powershell
-. C:\esp\v6.0.1\esp-idf\export.ps1
-python $env:IDF_PATH\tools\idf_tools.py install qemu-xtensa     # one-time, ~70MB
-. C:\esp\v6.0.1\esp-idf\export.ps1                              # re-source so PATH picks up qemu
-
-# QEMU's ESP32 model doesn't emulate the WiFi PHY — esp_wifi_init() asserts.
-# Use the sdkconfig.qemu overlay to disable WiFi for QEMU builds:
 idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.qemu" build
-idf.py qemu                    # boot QEMU, serial → stdout
-idf.py qemu monitor            # boot + interactive serial monitor
-idf.py qemu --gdb              # wait for `idf.py gdb` to attach (no JTAG)
-idf.py qemu --graphics         # adds virtual framebuffer for the ST7789
+idf.py qemu monitor                           # boots WROOM image, serial → stdout
 ```
 
-Verified working (2026-05-12) — QEMU boots the firmware, the engine ticks the peripheral_stub through cold-boot recovery, and you get the same `pstub: tickN Z=... newjob=... active=p077777@...` trace as on hardware. Example after ~30s of simulated time:
+WiFi PHY isn't emulated (the web DSKY is offline under QEMU). Everything else — engine, peripheral_stub, channel_router, display, touch, the canonical socket layer — runs. Useful for fast iteration without the COM<n> flash cycle.
 
-```
-I (3624) st7789: ST7789 ready: 320x240 landscape
-I (3644) dsky: display_hal up: 320x240, strip_h=80
-I (3644) app: loading ROM Comanche055 (73728 bytes)
-I (3983) app: serial_input: ready (UART0). type V/N/+/-/E/C/P/R/K/0-9 to drive DSKY
-...
-I (36790) chrouter: alarms RuptLock=0 NW=0 ... FAILREG=[01107,00000,77777] RegZ=04706 cyc=6283265
-I (36890) pstub: tick770 Z=05233 newjob=077777 active=p077777@002703 wakestal=-1
-```
+---
 
-The Espressif qemu-xtensa fork emulates the ESP32 SoC at the register level — same chip the WROOM-32 packages, so the firmware runs unchanged. **What's not emulated:** WiFi radio (web DSKY offline), touch controllers (no XPT2046/CST820 model). **What does run:** `agc_engine`, `peripheral_stub` (rescue chain + force_dispatch_charin), `channel_router`, `display_hal` over virtual ST7789, `agc_task` pinned to APP_CPU, the new `serial_input_task` (see below).
+## Tests
 
-#### Injecting DSKY keypresses in QEMU
-
-Two paths — pick the one that matches your host:
-
-**A. Serial console (Linux/macOS-friendly, flaky on Windows).** `main/app_main.c` starts `serial_input_task` which reads ASCII from UART0 and maps `V N + - E C P R K 0..9` to DSKY keycodes via `channel_router_post_key`. In `idf.py qemu monitor` just type `RV35E` (or any sequence). On real hardware over USB-serial this works perfectly. **On Windows hosts** the `-serial stdio` pipe to QEMU is unreliable when fed by `subprocess.PIPE` (verified — bytes get silently dropped); use `idf.py qemu monitor` with the keyboard, or use GDB injection instead.
-
-**B. GDB injection (rock-solid on any host).** Bypasses the UART chardev entirely.
-
-```powershell
-# Terminal A — start QEMU and halt the CPU waiting for GDB:
-. C:\esp\v6.0.1\esp-idf\export.ps1
-idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.qemu" qemu --gdb monitor
-
-# Terminal B — attach gdb with the espAGC helper script loaded:
-. C:\esp\v6.0.1\esp-idf\export.ps1
-idf.py gdb -x tools\qemu.gdbinit
-(gdb) continue       # let the firmware boot
-(gdb) <Ctrl-C>       # interrupt after a few seconds
-(gdb) call_key 18    # R (RSET)
-(gdb) call_key 17    # V
-(gdb) call_key 3     # 3
-(gdb) call_key 5     # 5
-(gdb) call_key 28    # E (ENTR)
-(gdb) continue       # watch the lamp test run
-(gdb) <Ctrl-C>
-(gdb) agc_state      # dump A/L/Q/Z/FB/slot/cycle
-(gdb) watch_slot     # break on next write to slot-0 PRIORITY
+```bash
+cd tests/host
+mingw32-make run                              # full Layer 1 + 2 — passes
+mingw32-make test_yaagc_socket_host.exe \
+             test_yaagc_socket_local.exe      # canonical-socket reliability harnesses
+py yaagc_socket_reliability.py 5              # 5/5 PRG=00 via TCP
 ```
 
-See `tools/qemu.gdbinit` for the full helper definitions including `run_v35e_demo` (scripted RV35E run) and notes per keycode. The slot-corruption watchpoint (`watch_slot`) is the recommended way to chase the V37E00E×2 bug captured in `test_slot_writes`.
-
-## Host tests
-
-Three layers of host tests run in ~2 seconds total. No hardware required.
-
-```powershell
-cd tests\host
-mingw32-make run    # gcc must be on PATH
-```
-
-### Layer 1 — pure logic (`-D__embedded__` against yaAGC + agc_init.c + a tiny IO stub)
-
-| Test | What it asserts |
+| Layer | What it tests |
 |---|---|
-| `test_rom_load` | ROM bank-reorder loader produces the right Fixed[bank][word] layout |
-| `test_engine_boot` | 50 000 AGC cycles run cleanly; PC moves off boot vector |
-| `test_channel10_emit` | Engine emits writes to ch010 (DSKY display) + ch011 (status) within 200 000 cycles |
-| `test_keypad_hit` | 320×240 keypad cell centers map to the right `dsky_key_t` codes; out-of-bounds returns -1 |
+| **Layer 1** — pure logic | ROM loader, engine boot, channel-10 DSKY emit, keypad hit-test |
+| **Layer 2a** — engine + real channel_router | Boot alarms, P00 select, lamp test, RSET clears, IMODES, FAILREG, CHARIN dispatch |
+| **Layer 2b** — renderer pixel tests | Blank-frame FNV-1a hash, lit-region assertions |
+| **Layer 2c** — canonical socket port | `test_yaagc_socket_host` over TCP **5/5 PRG=00**, `test_yaagc_socket_local` via inject path **3/3 PRG=00** |
+| `hardware_reliability_test.py` | Drives a live device over TCP — point at `<device-ip>:19850` |
 
-### Layer 2a — engine wired to the *real* channel_router
+The breakthrough this release ships on was finding `test_yaagc_socket_host` passes 5/5 while every in-process port (`test_canonical_match`, `test_simexecute`, `host_reliability_test`) failed 0/5. The diagnosis is documented across those test files' comments.
 
-These compile `components/channel_router/channel_router.c` against host shims (`tests/host/include/freertos/*.h`, `esp_log.h`) so we exercise the actual code path the firmware uses.
+---
 
-| Test | What it asserts |
-|---|---|
-| `test_alarm_at_boot` | Engine survives 5 M cycles after fresh-start; prints the agc_t alarm flags + resolved dsky_state for diagnosis |
-| `test_p00_select` | Boot, RSET, V37E00E — engine reaches a state where COMP ACTY blinks |
-| `test_lamp_test` | Boot, RSET, V35E — flash V/N + indicator lamps light within a window |
-| `test_rset_clears_alarms` | After RSET, `dsky_state.restart` clears (regression guard for the WriteIO routing fix) |
-| `test_replay_apollo11_launch` | Replays `third_party/virtualagc/yaDSKY2/Apollo11-launch.canned` (a yaDSKY2 recording of real Luminary output) directly through `channel_router_on_output`, asserts decoded PROG/VERB/NOUN/COMP ACTY match the launch transcript. Validates the entire decode pipeline against ground truth. |
+## Roadmap
 
-### Layer 2b — renderer pixel tests
+For the next release:
 
-Compile `dsky_render_320x240.c` + `font5x7.c` + `dsky_layout.c` + `dsky_keypad_320x240.c` against host gcc (zero ESP-IDF dependencies past `<string.h>`). Render into an in-memory RGB565 framebuffer and assert.
+- **State-vector init at PDI** — either a ch0173 UPRUPT packet injector (the canonical Apollo digital uplink path) or a typed V21/V22 sequence loading R₀ + V₀ from the Apollo 11 pre-PDI PAD. Once this lands, P63 displays altitude / velocity / time-to-go for real.
+- **LR data-good gating** — ch033 bits 4-5 + the LR antenna mode logic so Luminary's `RADARSUP` reads the RNRAD pulses we're already injecting.
+- **Full CM peripheral simulation** — Comanche055 boots clean now (LM_INI skipped under CM) but doesn't have CSM-specific channels (ch013 RHC, ch166/167/170 optics) driven yet.
+- **Delete the gated-off legacy rescue chain** — currently under `#ifndef CONFIG_AGC_YAAGC_SOCKET` so host Layer-2 tests still link. Migrate those tests to the canonical drain and delete the rescue code outright.
 
-| Test | What it asserts |
-|---|---|
-| `test_render_blank` | Blank dsky_state renders to a non-empty buffer; FNV-1a hash is stable across builds (drop a font or layout tweak — fail loudly, update the hash deliberately) |
-| `test_render_prog_lit` | After setting PROG=12, VERB=16, NOUN=65, region assertions confirm at least N amber pixels land inside the labelled cell rectangles. Robust to font/spacing tweaks; fails only when a digit literally isn't painted |
+Longer-term:
 
-### Reference harness — comparing against vanilla yaAGC
+- 1201/1202 alarm simulation for fidelity.
+- More canned sequences: P40 SPS burn maneuver, V41 RCS control, V51 IMU realign.
+- AGS (Abort Guidance System) simulation for full mission redundancy.
 
-`yaagc_ref.exe` is a minimal reference binary that links the **upstream** yaAGC engine + `agc_engine_init.c` + `NullAPI.c` directly. It's the cleanest way to see what cold-boot Luminary does without any of our integration layered on top — useful for distinguishing "our bug" from "upstream behavior."
+---
 
-```powershell
-cd tests\host
-mingw32-make yaagc_ref.exe
-./yaagc_ref.exe                          # vanilla yaAGC + Luminary099
-./yaagc_ref.exe --sim                    # + peripheral_stub_step every 1k cycles
-```
+## Credits
 
-Outputs `Z`, `PRIORITY`, `POLISH`, `LOC`, `REDOCTR` at cycle 1k / 5k / 10k / 30k / 100k / 500k / 1M / 2M, plus a Z-histogram of the last 10k cycles. The histogram makes deadlocks visible (one or two Z values dominating = stuck loop) versus healthy execution (broad distribution).
+- Engine, ropes, protocol — [virtualagc/virtualagc](https://github.com/virtualagc/virtualagc) by Ron Burkey and contributors.
+- Original Apollo Guidance Computer software — Margaret Hamilton and the MIT Instrumentation Lab team. The Luminary 099 / Comanche 055 source comments are theirs.
+- Apollo 11 keystroke timeline — [NASA Apollo Lunar Surface Journal](https://www.hq.nasa.gov/alsj/a11/).
+- Cheap Yellow Display hardware — Brian Lough and the [witnessmenow/ESP32-Cheap-Yellow-Display](https://github.com/witnessmenow/ESP32-Cheap-Yellow-Display) community.
 
-### Why this layering
-
-Three-layer pattern adopted from `dosNew/esp-dos/docs/testing.md`:
-- **Layer 1** runs in milliseconds, gates *everything*. Logic correctness only.
-- **Layer 2a** catches integration regressions (the kind of thing where ch010 row-mapping was wrong but every Layer 1 test passed). Replay against the canned Apollo 11 launch transcript is the strongest assertion in the repo — if the decoder is wrong, the replay diverges from ground truth.
-- **Layer 2b** catches "the digit suddenly isn't on the screen anymore" regressions without needing the LCD wired up.
-- **Layer 3 hardware** is reserved for things only hardware can show: backlight wiring, panel orientation, touch calibration, ROM-vs-peripheral interactions Luminary cares about.
-
-## Dependencies
-
-- ESP-IDF v6.0+
-- MinGW-w64 / gcc / clang on the host (for yaYUL)
-- All third-party code is in `third_party/` as submodules — `git submodule update --init --recursive` if you didn't `--recurse-submodules` at clone time.
-
-## License
-
-**GPL v2.** yaAGC's license carries through. See `LICENSE` and the
-`COPYING` file inside `third_party/virtualagc/`.
+License: **GPL v2** (inherited from yaAGC).
