@@ -191,6 +191,60 @@
     overflow: hidden;
   }
 
+  /* Walkthroughs — chained-sequence demos with progress */
+  .walk {
+    background: #0e141b;
+    border: 1px solid #1f2a36;
+    border-radius: .4rem;
+    padding: .55rem .65rem;
+    margin-bottom: .55rem;
+  }
+  .walk:last-child { margin-bottom: 0; }
+  .walk .row {
+    display: flex; align-items: baseline; gap: .55rem;
+  }
+  .walk .title {
+    color: #d4e2f0; font-size: .82rem; font-weight: 600; flex: 1;
+  }
+  .walk .badge {
+    font-size: .6rem; color: var(--mute); letter-spacing: .08em;
+    text-transform: uppercase;
+  }
+  .walk button.run {
+    font: inherit; padding: .35rem .7rem; font-size: .75rem;
+    background: #1e3a52; color: #cfe6f7;
+    border: 1px solid #2d5a82; border-radius: .35rem; cursor: pointer;
+  }
+  .walk button.run:hover  { background: #2a4d6c; }
+  .walk button.run[disabled] {
+    background: #1a232c; color: #5a6772; border-color: #2a3340; cursor: default;
+  }
+  .walk button.run.cancel { background: #3a1818; color: #ffb0b0; border-color: #5a2828; }
+  .walk .blurb {
+    color: #8fa5bb; font-size: .7rem; margin: .35rem 0 .45rem; line-height: 1.4;
+  }
+  .walk .progress {
+    font-size: .68rem; color: var(--amber);
+    margin: .35rem 0; min-height: 1rem;
+  }
+  .walk .progress.done { color: var(--green); }
+  .walk .progress.fail { color: var(--red); }
+  .walk ol.steps {
+    list-style: none; padding: 0; margin: 0;
+    display: flex; flex-direction: column; gap: .2rem;
+  }
+  .walk ol.steps li {
+    font-size: .7rem; color: #6f8aa4;
+    display: flex; align-items: baseline; gap: .45rem;
+  }
+  .walk ol.steps li .mark { width: 1rem; text-align: center; opacity: .8; }
+  .walk ol.steps li.s-done    { color: #c4dcee; }
+  .walk ol.steps li.s-done    .mark { color: var(--green); }
+  .walk ol.steps li.s-running { color: var(--amber); }
+  .walk ol.steps li.s-running .mark { color: var(--amber); }
+  .walk ol.steps li.s-fail    { color: var(--red); }
+  .walk ol.steps li.s-fail    .mark { color: var(--red); }
+
   /* Thrust panel */
   .thrust {
     display: flex; align-items: stretch; gap: .55rem;
@@ -337,8 +391,14 @@
 
   <!-- Sequences column -->
   <div class="col-seqs">
+
     <div class="card">
-      <h2>Canned sequences <span class="hint" id="seq-count"></span></h2>
+      <h2>Walkthroughs <span class="hint">one-click guided flows</span></h2>
+      <div id="walkthroughs"></div>
+    </div>
+
+    <div class="card">
+      <h2>Individual sequences <span class="hint" id="seq-count"></span></h2>
       <div id="seqs">loading…</div>
     </div>
   </div>
@@ -520,8 +580,9 @@
   };
   const decode = (tbl, s) => tbl[s] || (s.includes('_') ? '' : '');
 
-  let lastGen = -1;
-  let lastOk  = 0;
+  let lastGen   = -1;
+  let lastOk    = 0;
+  let lastState = null;
   const setConn = (ok) => {
     $('conn-led').className = 'led ' + (ok ? 'ok' : 'bad');
     $('conn-text').textContent = ok ? 'online' : 'offline';
@@ -533,6 +594,7 @@
       const s = await r.json();
       lastOk = Date.now();
       setConn(true);
+      lastState = s;
       if (s.gen === lastGen) return;
       lastGen = s.gen;
       $('gen-num').textContent = s.gen;
@@ -565,4 +627,197 @@
   };
   setInterval(pollState, 200);
   pollState();
+
+  /* ---------- walkthroughs (chained sequences with progress) ---------- */
+  // A walkthrough is a list of steps; each step is one of:
+  //   { seq:N }                 — POST /seq with body N
+  //   { thrust:0|1 }            — POST /thrust with body 0/1
+  //   { keys: 'V16N63E' }       — send each key in turn via /key
+  // Each step may set `wait` (predicate over state) and `timeout` (ms).
+  // `wait` returns true once we should advance. Default timeout 30s.
+  const WALKTHROUGHS = [
+    {
+      id: 'lamp-test',
+      title: 'Lamp test (V35E)',
+      blurb: 'Astronaut presses V35E on the panel — every status light comes on for ~5 s. The quickest "is it alive?" check.',
+      duration: '~6 s',
+      steps: [
+        { label: 'Press V35E on keypad',
+          seq: 0,
+          wait: s => s.ca === 1,  timeout: 4000 },
+        { label: 'Wait for COMP ACTY to drop',
+          wait: s => s.ca === 0,  timeout: 10000 },
+      ],
+    },
+    {
+      id: 'houston-lamp-test',
+      title: 'Houston uplinks V35E (UPRUPT)',
+      blurb: 'Same lamp test, but delivered via the CCC-encoded UPRUPT channel — exactly how Mission Control would do it. UPLINK ACTY lights while the bytes arrive.',
+      duration: '~10 s',
+      steps: [
+        { label: 'Mission Control transmits V35E',
+          seq: 8,
+          wait: s => s.up === 1,  timeout: 5000 },
+        { label: 'Uplink completes',
+          wait: s => s.up === 0,  timeout: 15000 },
+        { label: 'Lamp test runs',
+          wait: s => s.ca === 1,  timeout: 5000 },
+        { label: 'Lamps drop',
+          wait: s => s.ca === 0,  timeout: 10000 },
+      ],
+    },
+    {
+      id: 'idle-then-time',
+      title: 'P00 idle → display mission time',
+      blurb: 'Drop to background program P00, then monitor the mission clock with V16N36E. R1 ticks up once per second.',
+      duration: '~8 s',
+      steps: [
+        { label: 'V37E00E — select P00 idle',
+          seq: 1,
+          wait: s => s.prog === '00', timeout: 12000 },
+        { label: 'V16N36E — monitor mission time',
+          seq: 5,
+          wait: s => s.noun === '36', timeout: 6000 },
+      ],
+    },
+    {
+      id: 'apollo11-pdi',
+      title: 'Apollo 11 PDI — full landing demo',
+      blurb: 'Houston uplinks the LM state vector (V71, ~30 s), then we enter P63 braking, engage descent thrust, and monitor V16N63E so you can watch ALT / HDOT / TTOGO update as Luminary "lands".',
+      duration: '~60 s',
+      steps: [
+        { label: 'Houston uplinks state vector (V71, 19 components)',
+          seq: 9,
+          wait: s => s.prog === '27' && s.up === 1, timeout: 8000 },
+        { label: 'Wait for P27 to commit and exit',
+          wait: s => s.prog !== '27' && s.up === 0, timeout: 60000 },
+        { label: 'V37E63E — enter P63 braking',
+          seq: 3,
+          wait: s => s.prog === '63', timeout: 12000 },
+        { label: 'Engage descent thrust (PIPAZ pulses on)',
+          thrust: 1, settle: 800 },
+        { label: 'V16N63E — monitor ALT / HDOT / TTOGO',
+          keys: 'V16N63E',
+          wait: s => s.noun === '63', timeout: 6000 },
+        { label: 'Watch the numbers move…',
+          settle: 4000 },
+      ],
+    },
+  ];
+
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  const KEYMAP = { V:'VRB', N:'NUN', E:'ENTR', P:'PRO', R:'RSET', C:'CLR', K:'KREL', '+':'+', '-':'-' };
+  const tokenize = (str) => [...str].map(c => /[0-9]/.test(c) ? c : (KEYMAP[c] || c));
+
+  const waitFor = (pred, timeout) => new Promise((resolve, reject) => {
+    const start = Date.now();
+    const tick = () => {
+      if (lastState && pred(lastState)) return resolve();
+      if (Date.now() - start > timeout)   return reject(new Error('timeout'));
+      setTimeout(tick, 150);
+    };
+    tick();
+  });
+
+  async function runWalkthrough(w, ui) {
+    ui.setStatus('running', '');
+    for (let i = 0; i < w.steps.length; i++) {
+      const st = w.steps[i];
+      if (ui.cancelled) { ui.setStatus('fail', 'cancelled'); return; }
+      ui.markStep(i, 'running');
+      try {
+        if ('seq' in st) {
+          const r = await fetch('/seq', { method: 'POST', body: String(st.seq) });
+          if (!r.ok) throw new Error('seq HTTP ' + r.status);
+          log('▶ ' + (st.label || 'seq ' + st.seq), 'run');
+        }
+        if ('thrust' in st) {
+          const r = await fetch('/thrust', { method: 'POST', body: String(st.thrust) });
+          if (!r.ok) throw new Error('thrust HTTP ' + r.status);
+          // sync the standalone thrust button UI
+          thrustBtn.dataset.on = String(st.thrust);
+          thrustBtn.textContent = st.thrust ? 'Stop descent thrust' : 'Start descent thrust';
+          thrustState.classList.toggle('on', !!st.thrust);
+          thrustV.textContent = st.thrust ? 'ON' : 'OFF';
+          log((st.thrust ? '▶' : '■') + ' descent thrust', 'run');
+        }
+        if ('keys' in st) {
+          for (const tok of tokenize(st.keys)) {
+            if (ui.cancelled) throw new Error('cancelled');
+            await fetch('/key', { method: 'POST', body: tok });
+            await sleep(180);
+          }
+        }
+        if (st.wait)   await waitFor(st.wait, st.timeout || 30000);
+        if (st.settle) await sleep(st.settle);
+        ui.markStep(i, 'done');
+      } catch (e) {
+        ui.markStep(i, 'fail');
+        ui.setStatus('fail', st.label + ' — ' + e.message);
+        log('✗ walkthrough "' + w.title + '" failed: ' + e.message, 'err');
+        return;
+      }
+    }
+    ui.setStatus('done', 'complete');
+    log('✓ walkthrough "' + w.title + '" done', 'ok');
+  }
+
+  // Render walkthrough cards.
+  (function renderWalkthroughs() {
+    const root = $('walkthroughs');
+    WALKTHROUGHS.forEach(w => {
+      const wrap = document.createElement('div');
+      wrap.className = 'walk';
+      const stepsHtml = w.steps.map(s =>
+        '<li class="s-pending"><span class="mark">☐</span><span>' + s.label + '</span></li>'
+      ).join('');
+      wrap.innerHTML =
+        '<div class="row">' +
+          '<span class="title">' + w.title + '</span>' +
+          '<span class="badge">' + w.duration + '</span>' +
+          '<button class="run">▶ Run</button>' +
+        '</div>' +
+        '<div class="blurb">' + w.blurb + '</div>' +
+        '<div class="progress" hidden></div>' +
+        '<ol class="steps">' + stepsHtml + '</ol>';
+      const btn      = wrap.querySelector('button.run');
+      const progress = wrap.querySelector('.progress');
+      const stepEls  = wrap.querySelectorAll('ol.steps li');
+      const ui = {
+        cancelled: false,
+        markStep(i, cls) {
+          const el = stepEls[i];
+          el.className = 's-' + cls;
+          const mark = el.querySelector('.mark');
+          mark.textContent = cls === 'done' ? '✓' : cls === 'running' ? '…' : cls === 'fail' ? '✗' : '☐';
+        },
+        setStatus(cls, msg) {
+          progress.hidden = false;
+          progress.className = 'progress ' + cls;
+          progress.textContent =
+            cls === 'running' ? 'running…' :
+            cls === 'done'    ? '✓ ' + msg :
+            cls === 'fail'    ? '✗ ' + msg : msg;
+        },
+      };
+      btn.addEventListener('click', async () => {
+        if (btn.classList.contains('cancel')) {
+          ui.cancelled = true;
+          return;
+        }
+        // reset prior run
+        stepEls.forEach(el => {
+          el.className = 's-pending';
+          el.querySelector('.mark').textContent = '☐';
+        });
+        btn.classList.add('cancel');
+        btn.textContent = '✗ Cancel';
+        ui.cancelled = false;
+        await runWalkthrough(w, ui);
+        btn.classList.remove('cancel');
+        btn.textContent = '▶ Run';
+      });
+      root.appendChild(wrap);
+    });
+  })();
 </script>
