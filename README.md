@@ -26,7 +26,11 @@ Both **Luminary 099 (LM)** and **Comanche 055 (CSM)** mission ropes are reassemb
    I (1410) app: espAGC running
    I (2910) wifi_input: got ip: 192.168.1.23 — web DSKY at http://192.168.1.23/
    ```
-4. Open the web DSKY at `http://<device-ip>/`, tap **Lamp test (V35E)**, watch the LCD and the browser DSKY light up in lockstep.
+4. Open the web DSKY at `http://<device-ip>/`. The page lays out a live DSKY mirror, full keypad, a **Walkthroughs** panel of guided one-click demos, the underlying canned sequences, and an activity log:
+
+   ![Web DSKY overview](docs/screenshots/web-overview.png)
+
+5. Click any walkthrough — for the full ride try **Apollo 11 PDI — full landing demo**. The card checklist lights up step-by-step as Houston uplinks the state vector (V71), the AGC enters P63 braking, descent thrust engages, and V16N63E begins monitoring ALT/HDOT/TTOGO.
 
 If WiFi can't reach your network, the firmware falls back to a SoftAP called `espAGC` at `192.168.4.1`.
 
@@ -46,6 +50,9 @@ If WiFi can't reach your network, the firmware falls back to a SoftAP called `es
 | **PRG=00 (ch010 = 055265)** | ✅ 5/5 | Canonical socket reliability test passes against the device |
 | **Comanche 055 (CSM rope)** | ✅ boots | Hold the BOOT button at reset — DSKY comes up in CM mode |
 | **Touch / web / serial / TCP keypresses** | ✅ | All four input paths feed the same canonical drain |
+| **Houston UPRUPT V35E** | ✅ | Mission-Control-style CCC-encoded uplink via ch0173; UPLINK ACTY lights |
+| **V71 state-vector uplink (Apollo 11 PDI)** | ✅ commits | 21-component UPRUPT block reaches P27, commits with V33E, exits cleanly |
+| **Web UI walkthroughs** | ✅ | Chained-sequence demos with live per-step progress (lamp test → P00 → Apollo 11 PDI) |
 | **Descent thrust simulator** | ⚠️ wired, foundation only | Fires PIPA + LR pulses; displays need state-vector init to read them |
 | **Realistic ALT / HDOT / TTOGO in P63** | ❌ | Needs initial state vector at PDI — next release |
 
@@ -59,7 +66,17 @@ Four input paths, all converging on the same canonical mask+value drain inside `
 Tap the on-screen 19-key DSKY. The keypad is positioned along the right side of the panel; the rest of the screen shows the live DSKY display.
 
 ### 2. Web DSKY (`http://<device-ip>/`)
-Full 19-button keypad, live mirror of the LCD (PROG / VERB / NOUN / R1 / R2 / R3 + all 12 status lamps polled at 5 Hz), physical-keyboard shortcuts (`V` `N` `+` `-` `E` `C` `P` `R` `K` digits), and a one-click menu of canned sequences plus the descent-thrust toggle.
+
+A multi-column responsive page that mirrors everything the LCD shows plus adds keypad input, guided demos, and an activity log. On desktop it splits into four columns; on a phone it stacks into one:
+
+| Column | Contents |
+|---|---|
+| **DSKY display** | Live mirror of the 320×240 ST7789: 12 status lamps (each with a hover tooltip explaining what it means), PROG / VERB / NOUN with decoded labels under the digits ("63 → braking", "16 → monitor decimal", "63 → ALT/HDOT/TTOGO"), R1 / R2 / R3 in amber 7-seg styling. Polls `/state` at 5 Hz. |
+| **Keypad** | All 19 DSKY keys clickable; physical keyboard works too (`V` `N` `+` `-` `E`=Enter `C`=Backspace `P` `R` `K` and digits). |
+| **Walkthroughs + Sequences** | Walkthroughs are one-click chained demos with per-step progress checkboxes (☐ → … → ✓ / ✗). Underneath sits the full canned-sequence library, auto-grouped into **Programs / Telemetry / Mission / Uplinks / Diagnostics**. |
+| **Activity log + reference** | Timestamped, color-coded log of every action (key press, sequence start, walkthrough step, errors). Quick-reference card lists the common verb/noun shortcuts. |
+
+A sticky top bar shows **online/offline** based on whether `/state` is responding, plus the current state-update generation counter so you can confirm the engine is making progress.
 
 ### 3. Serial console (UART0)
 `idf.py monitor` exposes a real TTY. Type letters into the monitor — same map as the web: `V` `N` `+` `-` `E` `C` `P` `R` `K` `0`–`9`.
@@ -72,6 +89,23 @@ py tests/host/hardware_reliability_test.py 192.168.1.23:19850
 ```
 
 That's the same protocol yaDSKY2, LM_Simulator, and `windows_yaagc_test.py` use. The board appears to those peers as if it were yaAGC.exe running on a workstation.
+
+---
+
+## Walkthroughs — guided one-click demos
+
+The Walkthroughs card chains sequence runs, keypad strings, and the descent-thrust toggle into end-to-end flows with live per-step progress. Each step has a state predicate (e.g. *"wait until PROG = 63"*) and advances automatically once the AGC reports it. Failed steps surface as ✗ with the reason.
+
+Shipped today:
+
+| Walkthrough | What it does | Approx. duration |
+|---|---|---|
+| **Lamp test (V35E)** | Press V35E, watch COMP ACTY rise and fall. Smoke test for the whole input → engine → output path. | ~6 s |
+| **Houston uplinks V35E (UPRUPT)** | Mission Control transmits the same V35E via the CCC-encoded ch0173 uplink path. UPLINK ACTY lights → uplink completes → lamp test runs. Proves the uplink protocol works. | ~10 s |
+| **P00 idle → display mission time** | V37E00E to drop to the idle program, then V16N36E to monitor mission time. R1 ticks up once per second. | ~8 s |
+| **Apollo 11 PDI — full landing demo** | Houston uplinks the LM state vector (V71, 19 components — ~30 s), commits with V33E and exits P27, V37E63E selects P63 braking, descent thrust engages PIPAZ pulses at 52 Hz, V16N63E begins monitoring ALT / HDOT / TTOGO. | ~60 s |
+
+Run the **Apollo 11 PDI** walkthrough to see all four input paths cooperating: uplink (TCP), canned sequence (HTTP POST), thrust toggle (HTTP POST), and individual keystrokes (HTTP POST), all converging into the same canonical drain that feeds the real yaAGC engine. The DSKY mirror and the LCD update in lockstep.
 
 ---
 
@@ -109,6 +143,8 @@ When you click **Start descent thrust**, `peripheral_stub` flips a flag and the 
 Toggling the button OFF and ON resets the LR range to 50 000 ft so you can re-run the descent without rebooting.
 
 ### How to try it end-to-end
+
+The fastest path is **Apollo 11 PDI — full landing demo** in the Walkthroughs panel — it does steps 1–3 below for you and adds the V71 state-vector uplink up front. To run it manually:
 
 1. Click **P63 landing (V37E63E)** to set MODREG = 63.
 2. Type `V 1 6 N 6 3 E` (or click the sequence) so the DSKY is asked to display P63's "altitude / altitude rate / time-to-go" autodisplay.
