@@ -111,6 +111,17 @@ static const uint8_t SEQ_UPLINK_PDI_STATE[] = {
     // Time from AGC clock zero DP — use 0 (let SERVICER fill in)
     D0, D0, D0, D0, D0, E,               // T_hi
     D0, D0, D0, D0, D0, E,               // T_lo
+    // V71 21-component update writes 19 data items after the ECADR
+    // (II-2 per UPDATE_PROGRAM.agc:94-99). The state-vector layout
+    // above accounts for 15 of those; the trailing 4 are auxiliary
+    // cells UPSVFLAG..+18 (likely RRECT/VRECT continuations and
+    // alignment-padding storage). P27 won't fire V33E commit until
+    // it sees all 19, so we feed zeros and let Luminary's internal
+    // post-load processing populate the working copies.
+    D0, D0, D0, D0, D0, E,               // pad 1
+    D0, D0, D0, D0, D0, E,               // pad 2
+    D0, D0, D0, D0, D0, E,               // pad 3
+    D0, D0, D0, D0, D0, E,               // pad 4
     // ----- Step 3: V33 to commit -----
     V, D3, D3, E,                        // V33E (signal ready to store)
 };
