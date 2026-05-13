@@ -296,15 +296,38 @@ void peripheral_stub_on_output(int channel, int value)
 #define PINC_TYPE 0
 #define MINC_TYPE 2
 
-// Descent thrust simulation. When g_descent_active is non-zero,
-// peripheral_stub_step fires PIPAZ- pulses each tick at a rate
-// matching DPS thrust (~10 ft/s² nominal). Off by default — turning
-// it on without a P63-active state will accumulate negative velocity
-// against zero altitude (state vector is still uninitialised). The
-// Kconfig flag CONFIG_AGC_DESCENT_THRUST_SIM gates this; web/touch
-// drivers can also toggle via peripheral_stub_set_descent_thrust().
-static int g_descent_active   = 0;
-static int g_pipa_z_remainder = 0;   // fractional accumulator
+// Landing Radar range counter. Per Luminary099 ERASABLE_ASSIGNMENTS.agc:141
+// (RNRAD EQUALS 46) and ASSEMBLY_AND_OPERATION_INFORMATION.agc:792
+// ("RADAR RANGE WORD = 9.38 FEET"). Pulsing this counter via PINC
+// represents incoming LR range data — the AGC's RADARSUP / READRADR
+// routines sample it during the descent radar-update cycle. Real LR
+// fires at a few Hz, sampling once per altitude / velocity beam.
+#define RNRAD_COUNTER 046
+// 9.38 ft per RNRAD pulse — used to convert a feet-per-second sink rate
+// into a pulse cadence below.
+#define FEET_PER_RNRAD_PULSE 938     // hundredths of a foot, integer math
+
+// Descent simulation state. When g_descent_active is non-zero,
+// peripheral_stub_step fires both PIPAZ- pulses (modelling DPS thrust)
+// and RNRAD pulses (modelling LR range data) each tick. Off by
+// default. Toggle via peripheral_stub_set_descent_thrust() / web POST
+// /thrust. With a proper initial state vector + IMU alignment this
+// would produce realistic R1/R2/R3 — pending Phase 3 of the LM_Sim
+// port; for now it's a foundation that exercises the canonical drain
+// for both UnprogrammedIncrement (PIPAs) and counter-channel pulses
+// (RNRAD).
+static int g_descent_active     = 0;
+static int g_pipa_z_remainder   = 0;   // fractional accumulator
+// Simulated LR range, in hundredths of a foot, for the LR driver below.
+// PDI starts at ~50 000 ft; we tick down at ~300 ft/s while descent is
+// active so V16N68 shows a believable range trace even before the
+// state-vector path is ported.
+static long g_lr_range_cft      = 50000L * 100;
+static int  g_rnrad_remainder   = 0;
+// Step rate ≈ 10.4 Hz (96 ms ticks). 300 ft/s sink → 30 ft per tick →
+// ~3 RNRAD pulses (each = 9.38 ft) of "altitude decrement" to emit
+// per tick. The actual count depends on the integer arithmetic below.
+#define DESCENT_SINK_CFT_PER_STEP   3000   // 30 ft, hundredths-of-foot
 
 // LM Block II PIPA pulse rate at 10 ft/s² thrust = 10 / 0.192 ≈ 52 Hz.
 // peripheral_stub_step is called from peripheral_stub_tick every
@@ -314,7 +337,15 @@ static int g_pipa_z_remainder = 0;   // fractional accumulator
 void peripheral_stub_set_descent_thrust(int active)
 {
     g_descent_active = active ? 1 : 0;
-    ESP_LOGI(PSTUB_TAG, "descent thrust sim: %s",
+    if (g_descent_active) {
+        // Re-arm initial altitude so toggling off/on restarts a fresh
+        // descent run — useful for repeated demos without rebooting.
+        g_lr_range_cft    = 50000L * 100;
+        g_rnrad_remainder = 0;
+        g_pipa_z_remainder = 0;
+    }
+    ESP_LOGI(PSTUB_TAG,
+             "descent sim: %s (PIPAZ ~52 Hz, RNRAD from 50000 ft @ 300 ft/s)",
              g_descent_active ? "ON" : "OFF");
 }
 #define PCDU_INC_TYPE  1
@@ -425,10 +456,29 @@ void peripheral_stub_step(agc_t *state, uint32_t dt_us)
     //    negative. That's expected — full P63 needs state-vector
     //    init via uplink (Phase 3, see project memory).
     if (g_descent_active) {
+        // (a) PIPAZ thrust pulses
         g_pipa_z_remainder += PIPA_PULSES_PER_STEP_X10;
         while (g_pipa_z_remainder >= 10) {
             UnprogrammedIncrement(state, PIPAZ_COUNTER, MINC_TYPE);
             g_pipa_z_remainder -= 10;
+        }
+        // (b) LR range pulses. We model a steady ~300 ft/s sink rate
+        // and fire RNRAD pulses representing the altitude decrement
+        // each step. Real LR samples at a few Hz and the raw counter
+        // is range, not range rate — but Luminary's RADARSUP keeps
+        // a running delta internally so a steady pulse stream still
+        // exercises the right code path. RNRAD pulses use PINC.
+        // When g_lr_range_cft reaches 0 we hold there (touchdown).
+        if (g_lr_range_cft > 0) {
+            long step_cft = DESCENT_SINK_CFT_PER_STEP;
+            if (step_cft > g_lr_range_cft) step_cft = g_lr_range_cft;
+            g_lr_range_cft -= step_cft;
+            // Convert cft to RNRAD pulses (each = 9.38 ft = 938 cft).
+            g_rnrad_remainder += (int)step_cft;
+            while (g_rnrad_remainder >= FEET_PER_RNRAD_PULSE) {
+                UnprogrammedIncrement(state, RNRAD_COUNTER, PINC_TYPE);
+                g_rnrad_remainder -= FEET_PER_RNRAD_PULSE;
+            }
         }
     }
 }
@@ -829,10 +879,16 @@ void peripheral_stub_tick(agc_t *state)
                  g_diag_tick, z, newjob, active_prio, active_loc, wakestal_slot);
     }
 
-    // Rescues re-enabled after pacing fix (was 12x too fast).
-    // With correct AGC_PER_SECOND pacing, alarm rates are normal and
-    // the rescue triggers fire at sensible cadence rather than constant
-    // GOJAM looping. The full chain:
+#ifndef CONFIG_AGC_YAAGC_SOCKET
+    // ---- Legacy rescue chain ----
+    // These hacks papered over the in-process-driver bug that
+    // CONFIG_AGC_YAAGC_SOCKET fixes structurally. They are kept ONLY
+    // for builds that haven't moved to the canonical socket path yet
+    // (host Layer-2 tests, primarily). When CONFIG_AGC_YAAGC_SOCKET=y
+    // (now the firmware default), the canonical mask+value drain
+    // inside ChannelInput handles CHARIN dispatch / job swaps / etc
+    // the way yaAGC.exe does — no rescues needed.
+    //
     //   rescue_stuck_job: NEWJOB pending but executive can't swap
     //   rescue_wakestal_sleeper: slot parked in WAKESTAL forever
     //   dispatch_pending_charin: 1/ACCSET pinned, CHARIN slot waiting
@@ -840,11 +896,8 @@ void peripheral_stub_tick(agc_t *state)
     rescue_stuck_job(state);
     rescue_wakestal_sleeper(state);
     dispatch_pending_charin(state);
-    // Aggressive fallback: if a keypress was queued and the engine has
-    // not reached CHARIN code, force-dispatch it directly. This works
-    // around the broken NOVAC slot allocation that prevents CHARIN
-    // from ever running normally during cold boot.
     if (g_keypress_pending) force_dispatch_charin(state);
+#endif
 
     // Generic "active job stuck at same Z" rescue. Hardware monitor
     // shows the engine bouncing forever in tight loops with an active
@@ -857,6 +910,7 @@ void peripheral_stub_tick(agc_t *state)
     // K=4 ticks ≈ 3 sec on ESP32 ≈ 32K simulated cycles. A healthy
     // engine moves Z hundreds-of-thousands of distinct addresses per
     // second; if it's pinned to ONE Z for 3 sec, it's stuck.
+#ifndef CONFIG_AGC_YAAGC_SOCKET
     static int g_stuck_z_count = 0;
     static int g_stuck_z_last = 0;
     static int g_stuck_z_rescues = 0;
@@ -880,4 +934,5 @@ void peripheral_stub_tick(agc_t *state)
         g_stuck_z_count = 0;
     }
     g_stuck_z_last = z_check;
+#endif
 }

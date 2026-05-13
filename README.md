@@ -15,6 +15,37 @@ The emulator core is yaAGC. License is **GPL v2** (carries through from yaAGC).
 | Layer 3 — QEMU | **available** | Espressif's `qemu-xtensa` (9.2.2) supports `-machine esp32`. `idf.py qemu monitor` runs the firmware. WiFi radio not emulated; everything else (engine, peripheral_stub, channel_router, display_hal) runs. |
 | Layer 4 — hardware | **boots, engine runs, V37 programs transition correctly** ✅ | With `CONFIG_AGC_YAAGC_SOCKET=y`: cold boot → WiFi associates → deferred LM_INI fires via canonical mask+value flow. V37E63E reaches **`active=p044322@021301`** (P63 SERVICER scheduled and running). V05N09 displays alarms. The Apollo 11 landing transcript sequence walks PDI → 1201/1202 PRO acks → V16N68 → P66 → touchdown. PROG/VERB/NOUN render on both LCD and web DSKY. P63's R1/R2/R3 stay blank until PIPA/LR pulse injection lands (see "Descent thrust" below — foundation in place, full landing simulation is multi-session work). |
 
+### Descent simulation (foundation for full landing)
+
+The web DSKY's "Start descent thrust" button (or `POST /thrust 1`)
+arms `peripheral_stub`'s descent driver:
+
+- **PIPAZ pulses** at ~52 Hz through `UnprogrammedIncrement` —
+  models DPS engine thrust along body +Z, integrated by SERVICER
+  into sensed velocity.
+- **RNRAD pulses** representing landing-radar range — starts at
+  50 000 ft, ticks down at 300 ft/s, fires one pulse per 9.38 ft of
+  descent through the same canonical drain. Resets every time the
+  button toggles back on.
+
+Realistic R1/R2/R3 in V06N63 / V16N68 still require an uplinked
+initial state vector at PDI — `peripheral_stub` doesn't pretend to
+have that. PIPAs + LR exercise the relevant pulse mechanisms so
+the next session (state-vector init via ch0173 UPRUPT or a typed
+V21N02 sequence) can complete the loop.
+
+### Legacy rescue chain (removed from canonical path)
+
+`peripheral_stub_tick` used to call `rescue_stuck_job`,
+`rescue_wakestal_sleeper`, `dispatch_pending_charin`,
+`force_dispatch_charin`, and `rescue_stuck_z` to paper over the
+in-process-driver bug. With `CONFIG_AGC_YAAGC_SOCKET=y` (now the
+firmware default) the canonical drain handles these conditions
+correctly, so the calls are gated behind `#ifndef
+CONFIG_AGC_YAAGC_SOCKET`. They still exist for host Layer-2 tests
+that compile without the flag (those tests use the legacy path and
+remain at PASS).
+
 ### What changed (2026-05-13)
 
 The hardware-display blank was a **driver-loop bug**, not a Luminary issue. Every in-process port of yaAGC's main loop we tried failed V37E00E×2 with the same deterministic state, but yaAGC.exe + Python socket driver passed 5/5. Bisection ruled out our integration features, our SimExecute port, our pacing, and per-channel value differences in LM_INI.

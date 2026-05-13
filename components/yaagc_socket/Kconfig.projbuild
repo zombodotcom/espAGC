@@ -2,22 +2,27 @@ menu "espAGC canonical yaAGC socket (Task #18)"
 
 config AGC_YAAGC_SOCKET
     bool "Route engine I/O through canonical SocketAPI semantics"
-    default n
+    default y
     help
-        Replace io_callbacks.c::ChannelInput/Output/Routine with the
-        canonical yaAGC SocketAPI port in components/yaagc_socket. The
-        engine then exposes its channel-I/O surface as a TCP listener
-        speaking the canonical 4-byte protocol, exactly like upstream
-        yaAGC.exe (which we've verified succeeds 5/5 on V37E00E×2).
+        Route ChannelInput/Output/Routine through the canonical yaAGC
+        SocketAPI port in components/yaagc_socket. The engine then
+        exposes its channel-I/O surface as a TCP listener speaking the
+        canonical 4-byte protocol — same path that yaAGC.exe uses on
+        Pi/Linux, verified 5/5 on V37E00E×2 + working on hardware as
+        of 2026-05-13.
 
-        With this on, peripheral clients (LM_Simulator port, test
-        drivers like windows_yaagc_test.py) connect via TCP and drive
-        the engine through the same path canonical Pi/Linux uses. The
-        local channel_router stays in the output chain so the LCD
-        keeps rendering even without a connected peer.
+        Default-y as of the canonical-port commit. The legacy
+        channel_router pump_input path is preserved under `#ifndef
+        CONFIG_AGC_YAAGC_SOCKET` for host Layer-2 tests; disable this
+        Kconfig only if you need to A/B-test against that legacy
+        behaviour. Hardware should always have it on.
 
-        Leave off until io_callbacks.c is updated to forward and
-        app_main calls yaagc_socket_init().
+        With this on, local sources (touch / web DSKY / peripheral_stub
+        LM_INI) inject through a synthetic-client byte ring inside
+        yaagc_socket, so the canonical mask+value drain handles them
+        identically to TCP peer arrivals. The LCD/web mirror keeps
+        working via channel_router_on_output which is still called
+        unconditionally from ChannelOutput.
 
 config AGC_YAAGC_SOCKET_PORT
     int "TCP port for yaAGC node listener"
