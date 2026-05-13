@@ -24,9 +24,63 @@
   button.seq:active { background:#1f2f3e; }
   button.seq small  { display:block; opacity:.6; font-size:.75rem; margin-top:.15rem; }
   .log  { margin-top:1rem; font-size:.8rem; opacity:.6; max-height:6rem; overflow:auto; }
+
+  /* DSKY mirror panel — mirrors what the ST7789 LCD shows on hardware. */
+  .dsky { background:#0a0a0a; border:1px solid #2a2a2a; border-radius:.4rem;
+          padding:.7rem; margin-bottom:.4rem; }
+  .dsky .lamps { display:grid; grid-template-columns:repeat(4, 1fr);
+                 gap:.3rem; margin-bottom:.5rem; font-size:.65rem;
+                 letter-spacing:.05em; }
+  .dsky .lamp  { background:#181818; color:#444; padding:.2rem .3rem;
+                 text-align:center; border-radius:.2rem;
+                 border:1px solid #222; }
+  .dsky .lamp.on { background:#2a1f00; color:#FFB000; border-color:#5a4000;
+                   box-shadow: inset 0 0 4px #6b4d00; }
+  .dsky .regs  { font-family: "Courier New", monospace; }
+  .dsky .pvn   { display:grid; grid-template-columns:repeat(3, 1fr);
+                 column-gap:.6rem; padding:.2rem 0; }
+  .dsky .pvn .field { text-align:center; }
+  .dsky .pvn .label { color:#888; font-size:.6rem; letter-spacing:.1em; }
+  .dsky .pvn .digits { color:#FFB000; font-size:1.4rem; letter-spacing:.1em;
+                       text-shadow: 0 0 6px #FFB00060; }
+  .dsky .pvn .digits.flash { animation: flash 1s steps(1) infinite; }
+  @keyframes flash { 50% { opacity: 0.25; } }
+  .dsky .r     { color:#FFB000; font-size:1.2rem; padding:.1rem 0;
+                 text-shadow: 0 0 6px #FFB00060; }
+  .dsky .r .sign { display:inline-block; width:1.2ch; }
+  .dsky .r .num  { letter-spacing:.05em; }
+  .dsky .r .rlabel { color:#888; font-size:.7rem; margin-right:.6rem; }
+  .dsky .blank { color:#332600; }   /* dim segments behind a blank digit */
 </style>
 
 <h1>espAGC — virtual DSKY</h1>
+
+<div class="dsky" id="dsky">
+  <div class="lamps">
+    <div class="lamp" id="L_ca">COMP&nbsp;ACTY</div>
+    <div class="lamp" id="L_up">UPLINK&nbsp;ACTY</div>
+    <div class="lamp" id="L_temp">TEMP</div>
+    <div class="lamp" id="L_noatt">NO&nbsp;ATT</div>
+    <div class="lamp" id="L_gl">GIMBAL&nbsp;LOCK</div>
+    <div class="lamp" id="L_pa">PROG</div>
+    <div class="lamp" id="L_rstr">RESTART</div>
+    <div class="lamp" id="L_trk">TRACKER</div>
+    <div class="lamp" id="L_krel">KEY&nbsp;REL</div>
+    <div class="lamp" id="L_oe">OPR&nbsp;ERR</div>
+    <div class="lamp" id="L_stby">STBY</div>
+    <div class="lamp" id="L_fvn">V/N&nbsp;FLASH</div>
+  </div>
+  <div class="regs">
+    <div class="pvn">
+      <div class="field"><div class="label">PROG</div><div class="digits" id="prog">__</div></div>
+      <div class="field"><div class="label">VERB</div><div class="digits" id="verb">__</div></div>
+      <div class="field"><div class="label">NOUN</div><div class="digits" id="noun">__</div></div>
+    </div>
+    <div class="r"><span class="rlabel">R1</span><span class="num" id="r1">______</span></div>
+    <div class="r"><span class="rlabel">R2</span><span class="num" id="r2">______</span></div>
+    <div class="r"><span class="rlabel">R3</span><span class="num" id="r3">______</span></div>
+  </div>
+</div>
 
 <h2>Keypad</h2>
 <div class="pad">
@@ -50,6 +104,12 @@
 
 <h2>Canned sequences</h2>
 <div class="seqs" id="seqs">loading…</div>
+
+<h2>Descent thrust simulator</h2>
+<button class="seq" id="thrust-toggle" data-on="0">
+  Start descent thrust (PIPAZ pulses ~52 Hz)
+  <small>Foundation for P63/P66 — fires PIPAZ- pulses through the canonical drain so SERVICER sees the LM decelerating. HDOT in V16N63E should count up. ALT will go negative without an initial state vector (Phase 3 work).</small>
+</button>
 
 <pre class="log" id="log"></pre>
 
@@ -83,6 +143,22 @@
     if (tok) sendKey(tok);
   });
 
+  const thrustBtn = document.getElementById('thrust-toggle');
+  if (thrustBtn) {
+    thrustBtn.addEventListener('click', () => {
+      const next = thrustBtn.dataset.on === '1' ? '0' : '1';
+      fetch('/thrust', { method: 'POST', body: next })
+        .then(r => {
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          thrustBtn.dataset.on = next;
+          thrustBtn.firstChild.textContent =
+            next === '1' ? 'Stop descent thrust' : 'Start descent thrust (PIPAZ pulses ~52 Hz)';
+          log((next === '1' ? '▶' : '■') + ' descent thrust');
+        })
+        .catch(e => log('thrust err: ' + e));
+    });
+  }
+
   fetch('/seqs').then(r => r.json()).then(list => {
     const root = document.getElementById('seqs');
     root.innerHTML = '';
@@ -96,4 +172,56 @@
   }).catch(e => {
     document.getElementById('seqs').textContent = 'failed to load: ' + e;
   });
+
+  // DSKY display mirror — polls /state on a short interval and renders
+  // the same fields the ST7789 LCD shows. Underscore ("_") is the AGC's
+  // blank-digit code and is dimmed via the .blank class.
+  const renderDigits = (id, s) => {
+    const el = document.getElementById(id);
+    el.textContent = s;
+    // Re-emit with dimmed blanks for visual fidelity.
+    el.innerHTML = '';
+    for (const c of s) {
+      const span = document.createElement('span');
+      span.textContent = c;
+      if (c === '_') span.className = 'blank';
+      el.appendChild(span);
+    }
+  };
+  const setLamp = (id, on) => {
+    document.getElementById(id).classList.toggle('on', !!on);
+  };
+  let lastGen = -1;
+  const pollState = async () => {
+    try {
+      const r = await fetch('/state', { cache: 'no-store' });
+      if (!r.ok) return;
+      const s = await r.json();
+      if (s.gen === lastGen) return;
+      lastGen = s.gen;
+      renderDigits('prog', s.prog);
+      renderDigits('verb', s.verb);
+      renderDigits('noun', s.noun);
+      renderDigits('r1', s.r1);
+      renderDigits('r2', s.r2);
+      renderDigits('r3', s.r3);
+      // V/N flash gets a CSS animation when set.
+      document.getElementById('verb').classList.toggle('flash', !!s.fvn);
+      document.getElementById('noun').classList.toggle('flash', !!s.fvn);
+      setLamp('L_ca',    s.ca);
+      setLamp('L_up',    s.up);
+      setLamp('L_temp',  s.temp);
+      setLamp('L_noatt', s.noatt);
+      setLamp('L_gl',    s.gl);
+      setLamp('L_pa',    s.pa);
+      setLamp('L_rstr',  s.rstr);
+      setLamp('L_trk',   s.trk);
+      setLamp('L_krel',  s.krel);
+      setLamp('L_oe',    s.oe);
+      setLamp('L_stby',  s.stby);
+      setLamp('L_fvn',   s.fvn);
+    } catch (e) { /* network blip, try again next tick */ }
+  };
+  setInterval(pollState, 200);   // 5 Hz — gentle on the ESP32 HTTP server
+  pollState();
 </script>

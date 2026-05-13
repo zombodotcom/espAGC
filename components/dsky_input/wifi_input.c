@@ -11,6 +11,8 @@
 
 #include "channel_router.h"
 #include "dsky_input.h"
+#include "dsky_state.h"
+#include "peripheral_stub.h"
 #include "sequences.h"
 
 #include <string.h>
@@ -92,20 +94,81 @@ static esp_err_t handle_seq(httpd_req_t *req)
     return ESP_FAIL;
 }
 
+// GET /state -> JSON snapshot of the resolved DSKY state so the web UI
+// can render the same panel the ST7789 shows on the device. dsky_digit_t
+// uses -1 for blank; emit those as the JSON string "_" so the browser
+// can render them as the dimmed-segment blank position.
+static void append_digits(char *buf, size_t cap, size_t *off,
+                          const char *name, const dsky_digit_t *d, int n,
+                          dsky_sign_t sign)
+{
+    *off += snprintf(buf + *off, cap - *off, ",\"%s\":\"", name);
+    if (sign == DSKY_SIGN_PLUS)  *off += snprintf(buf + *off, cap - *off, "+");
+    else if (sign == DSKY_SIGN_MINUS) *off += snprintf(buf + *off, cap - *off, "-");
+    for (int i = 0; i < n; i++) {
+        if (d[i] == DSKY_BLANK) *off += snprintf(buf + *off, cap - *off, "_");
+        else                    *off += snprintf(buf + *off, cap - *off, "%d", d[i]);
+    }
+    *off += snprintf(buf + *off, cap - *off, "\"");
+}
+
+static esp_err_t handle_state(httpd_req_t *req)
+{
+    dsky_state_t s;
+    channel_router_snapshot(&s);
+    char buf[768];
+    size_t off = 0;
+    off += snprintf(buf + off, sizeof(buf) - off,
+                    "{\"gen\":%llu", (unsigned long long)s.generation);
+    append_digits(buf, sizeof(buf), &off, "prog", s.prog, 2, DSKY_SIGN_NONE);
+    append_digits(buf, sizeof(buf), &off, "verb", s.verb, 2, DSKY_SIGN_NONE);
+    append_digits(buf, sizeof(buf), &off, "noun", s.noun, 2, DSKY_SIGN_NONE);
+    append_digits(buf, sizeof(buf), &off, "r1",   s.r1,   5, s.r1_sign);
+    append_digits(buf, sizeof(buf), &off, "r2",   s.r2,   5, s.r2_sign);
+    append_digits(buf, sizeof(buf), &off, "r3",   s.r3,   5, s.r3_sign);
+    off += snprintf(buf + off, sizeof(buf) - off,
+        ",\"ca\":%d,\"up\":%d,\"temp\":%d,\"noatt\":%d,\"gl\":%d,"
+        "\"pa\":%d,\"rstr\":%d,\"trk\":%d,\"krel\":%d,\"oe\":%d,"
+        "\"stby\":%d,\"fvn\":%d}",
+        s.comp_acty, s.uplink_acty, s.temp, s.no_att, s.gimbal_lock,
+        s.prog_alarm, s.restart, s.tracker, s.key_rel, s.opr_err,
+        s.stby, s.flash_verb_noun);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, buf, off);
+}
+
+// POST /thrust -> body "0" or "1" toggles the descent-thrust PIPA driver
+// in peripheral_stub. Useful for demonstrating P63/P66 with HDOT
+// counting up. See peripheral_stub_set_descent_thrust comment.
+static esp_err_t handle_thrust(httpd_req_t *req)
+{
+    char buf[8];
+    int recv = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (recv <= 0) { httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "no body"); return ESP_FAIL; }
+    buf[recv] = 0;
+    peripheral_stub_set_descent_thrust(atoi(buf));
+    return httpd_resp_sendstr(req, "ok");
+}
+
 static void start_http(void)
 {
     httpd_handle_t server = NULL;
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.lru_purge_enable = true;
     ESP_ERROR_CHECK(httpd_start(&server, &cfg));
-    httpd_uri_t root = { .uri = "/",     .method = HTTP_GET,  .handler = handle_index };
-    httpd_uri_t key  = { .uri = "/key",  .method = HTTP_POST, .handler = handle_key   };
-    httpd_uri_t seqs = { .uri = "/seqs", .method = HTTP_GET,  .handler = handle_seqs  };
-    httpd_uri_t seq  = { .uri = "/seq",  .method = HTTP_POST, .handler = handle_seq   };
+    httpd_uri_t root   = { .uri = "/",       .method = HTTP_GET,  .handler = handle_index  };
+    httpd_uri_t key    = { .uri = "/key",    .method = HTTP_POST, .handler = handle_key    };
+    httpd_uri_t seqs   = { .uri = "/seqs",   .method = HTTP_GET,  .handler = handle_seqs   };
+    httpd_uri_t seq    = { .uri = "/seq",    .method = HTTP_POST, .handler = handle_seq    };
+    httpd_uri_t state  = { .uri = "/state",  .method = HTTP_GET,  .handler = handle_state  };
+    httpd_uri_t thrust = { .uri = "/thrust", .method = HTTP_POST, .handler = handle_thrust };
     httpd_register_uri_handler(server, &root);
     httpd_register_uri_handler(server, &key);
     httpd_register_uri_handler(server, &seqs);
     httpd_register_uri_handler(server, &seq);
+    httpd_register_uri_handler(server, &state);
+    httpd_register_uri_handler(server, &thrust);
 }
 
 // ---- STA path ----------------------------------------------------------

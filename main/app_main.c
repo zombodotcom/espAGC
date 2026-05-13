@@ -19,6 +19,7 @@
 #include "apollo_rom.h"
 #include "board_pins.h"
 #include "channel_router.h"
+#include "dsky_keys.h"
 #include "display_hal.h"
 #include "dsky_input.h"
 #include "display_panel_iface.h"
@@ -27,11 +28,18 @@
 #include "touch_input.h"
 #include "dsky_layout.h"
 
+#ifdef CONFIG_AGC_YAAGC_SOCKET
+#include "yaagc_socket.h"
+#endif
+
 #include "driver/gpio.h"
+#include "driver/uart.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+
+#include <ctype.h>
 
 // APP_CPU_NUM / PRO_CPU_NUM are defined by ESP-IDF's soc.h via FreeRTOS,
 // but provide fallback macros in case a future SDK rearranges headers.
@@ -94,6 +102,74 @@ static void ui_task(void *arg)
     }
 }
 
+// Map an ASCII character to a DSKY keycode. Returns -1 for chars that
+// don't correspond to any key. Mirrors the WSL capture script's keymap
+// (tests/host/capture_with_dumps.sh) so the same one-character commands
+// drive both the WSL reference and our build.
+//
+//   V=verb N=noun +/- E=ENTR C=CLR P=PRO R=RSET K=KEY REL
+//   0..9 = digit keys (with 0 mapped to DSKY_KEY_0 = 16)
+static int serial_ascii_to_keycode(int c)
+{
+    c = toupper(c);
+    switch (c) {
+        case 'V': return DSKY_KEY_VERB;
+        case 'N': return DSKY_KEY_NOUN;
+        case '+': return DSKY_KEY_PLUS;
+        case '-': return DSKY_KEY_MINUS;
+        case 'E': return DSKY_KEY_ENTR;
+        case 'C': return DSKY_KEY_CLR;
+        case 'P': return DSKY_KEY_PRO;
+        case 'R': return DSKY_KEY_RSET;
+        case 'K': return DSKY_KEY_KEYREL;
+        case '0': return DSKY_KEY_0;
+        case '1': case '2': case '3': case '4': case '5':
+        case '6': case '7': case '8': case '9':
+            return c - '0';
+        default:  return -1;
+    }
+}
+
+// Serial input task — drives keypresses from the UART0 console.
+//
+// Purpose: under QEMU there's no emulated WiFi PHY or touch controller,
+// so neither dsky_input (web DSKY) nor touch_input (CST820/XPT2046) can
+// inject keystrokes. UART0 is the one input QEMU does expose — `idf.py
+// qemu monitor` connects stdin/stdout to UART0. Type "V37E" into the
+// monitor to dispatch verb 37 enter, exactly like pressing it on the
+// hardware DSKY. Works on real hardware too (useful for headless boot
+// scripts or anyone with a USB-serial console), so we keep it always-on.
+//
+// Whitespace (space, newline, tab) is ignored as a separator. Unknown
+// characters are silently dropped — typos can't crash the engine.
+static void serial_input_task(void *arg)
+{
+    (void)arg;
+    // The console UART is configured by ESP-IDF for the log pipe but the
+    // *driver* isn't installed by default — uart_read_bytes silently
+    // returns 0 without it. Install a minimal RX-only driver on UART0.
+    // (TX is already used by the log output; we don't replace that.)
+    const uart_port_t port = UART_NUM_0;
+    if (uart_is_driver_installed(port) == false) {
+        // 256-byte RX buffer is plenty for human typing speed.
+        esp_err_t err = uart_driver_install(port, 256, 0, 0, NULL, 0);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "uart_driver_install(UART0) failed: %d — serial input disabled", err);
+            vTaskDelete(NULL);
+        }
+    }
+    ESP_LOGI(TAG, "serial_input: ready (UART0). type V/N/+/-/E/C/P/R/K/0-9 to drive DSKY");
+    for (;;) {
+        uint8_t ch;
+        int n = uart_read_bytes(port, &ch, 1, pdMS_TO_TICKS(100));
+        if (n <= 0) continue;
+        int code = serial_ascii_to_keycode(ch);
+        if (code < 0) continue;
+        ESP_LOGI(TAG, "serial: '%c' -> dsky_key=%d", ch, code);
+        channel_router_post_key(code);
+    }
+}
+
 void app_main(void)
 {
     board_init();
@@ -119,6 +195,16 @@ void app_main(void)
         return;
     }
 
+    // Tell agc_engine which rope it's running. Defaults to 0 (LM); set
+    // to 1 for CM (Comanche055). Gates ch013 RHC handling, ch166/167/170
+    // optics, and the absence of ch0163 lamp writes — without this the
+    // CM rope boots into a state where PINBALL never renders, which is
+    // why holding BOOT at reset showed a black screen.
+    extern int CmOrLm;
+    CmOrLm = (rom_id == APOLLO_ROM_COMANCHE055) ? 1 : 0;
+    ESP_LOGI(TAG, "engine mode: %s (CmOrLm=%d)",
+             CmOrLm ? "CM" : "LM", CmOrLm);
+
     // Initialize the peripheral simulator. Future stages of this will
     // continuously drive ch030/031/032/033 and push CDU counter pulses
     // (mimicking what LM_Simulator does on Pi/Linux). For now it's a
@@ -126,7 +212,11 @@ void app_main(void)
     peripheral_stub_init();
 
     dsky_input_config_t in_cfg = {
+#ifdef CONFIG_ESPAGC_DISABLE_WIFI
+        .enable_wifi_ap = false,     // QEMU build: no WiFi PHY available
+#else
         .enable_wifi_ap = true,
+#endif
         .wifi_ssid = "espAGC",
         .wifi_password = "",     // open network
     };
@@ -143,6 +233,23 @@ void app_main(void)
         }
     }
 
+#ifdef CONFIG_AGC_YAAGC_SOCKET
+    // Canonical SocketAPI listener (Task #18). MUST run before
+    // agc_task starts — the engine's first ChannelOutput will iterate
+    // s_clients[], and if the array is still zero-initialised at that
+    // point every slot looks like fd=0 to send(), triggering an
+    // immediate "client 0 dropped (send errno=9)" and tearing down
+    // the synthetic local client (slot 0). Bring the listener up
+    // BEFORE creating the engine task so its slot table is in the
+    // right shape (synthetic at 0, -1 elsewhere) by the time the
+    // first engine cycle runs.
+    int sock_rc = yaagc_socket_init(CONFIG_AGC_YAAGC_SOCKET_PORT);
+    if (sock_rc != 0) {
+        ESP_LOGE(TAG, "yaagc_socket_init failed (port %d)",
+                 CONFIG_AGC_YAAGC_SOCKET_PORT);
+    }
+#endif
+
     // ESP32 dual-core: pin AGC engine to APP_CPU (core 1) at high
     // priority so its real-time pacing isn't perturbed by WiFi/touch
     // bursts on PRO_CPU (core 0). UI/snapshot work runs on core 0
@@ -151,6 +258,9 @@ void app_main(void)
     // the "cores" replace the process boundary.
     xTaskCreatePinnedToCore(agc_task, "agc", 6144, NULL, 10, NULL, APP_CPU_NUM);
     xTaskCreatePinnedToCore(ui_task,  "ui",  6144, NULL,  5, NULL, PRO_CPU_NUM);
+    // serial_input is small + blocks on UART read, leave unpinned. Useful
+    // primarily under QEMU (no WiFi/touch), but harmless on hardware too.
+    xTaskCreate(serial_input_task, "serial_in", 3072, NULL, 4, NULL);
 
     ESP_LOGI(TAG, "espAGC running");
     if (led) led->set_rgb(0x00, 0x40, 0x00);   // dim green = healthy

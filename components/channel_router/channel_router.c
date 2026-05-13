@@ -393,6 +393,20 @@ void channel_router_on_routine(void)
 
 void channel_router_post_key(int code)
 {
+#ifdef CONFIG_AGC_YAAGC_SOCKET
+    // Route the keypress through the canonical SocketAPI drain. This is
+    // the path that just proved 5/5 on host (test_yaagc_socket_local +
+    // test_yaagc_socket_host). The synthetic-client byte ring queues a
+    // single 4-byte packet for ch015; ChannelInput inside agc_engine
+    // picks it up on the next drain cycle, applies the mask logic, and
+    // does WriteIO + IR5 the way yaAGC.exe does. No need for the
+    // ring/force-dispatch dance — the canonical path is sufficient.
+    extern int yaagc_socket_inject_key(int code);
+    if (yaagc_socket_inject_key(code) != 0) {
+        ESP_LOGW(TAG, "yaagc_socket inject_key full, dropping %d", code);
+    }
+    return;
+#else
     bool dropped = false;
 #ifdef CONFIG_AGC_TRACE_KEYRUPT1
     uint16_t head_after = 0, tail_after = 0;
@@ -423,6 +437,7 @@ void channel_router_post_key(int code)
     // set up the engine to execute CHARIN — works around the slot-
     // allocation bug that prevents normal dispatch during cold boot.
     if (!dropped) peripheral_stub_on_keypress_posted((uint8_t)(code & 0x1F));
+#endif
 }
 
 uint64_t channel_router_snapshot(dsky_state_t *out)

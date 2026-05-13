@@ -4,4 +4,6 @@ idf_component_register(
     REQUIRES     agc_core apollo_rom channel_router display_hal dsky_input
                  peripheral_stub touch_input
                  led_status board_cyd_2432s028
+                 esp_driver_uart
+                 yaagc_socket
 )

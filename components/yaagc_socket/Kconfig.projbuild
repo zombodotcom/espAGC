@@ -1,0 +1,33 @@
+menu "espAGC canonical yaAGC socket (Task #18)"
+
+config AGC_YAAGC_SOCKET
+    bool "Route engine I/O through canonical SocketAPI semantics"
+    default n
+    help
+        Replace io_callbacks.c::ChannelInput/Output/Routine with the
+        canonical yaAGC SocketAPI port in components/yaagc_socket. The
+        engine then exposes its channel-I/O surface as a TCP listener
+        speaking the canonical 4-byte protocol, exactly like upstream
+        yaAGC.exe (which we've verified succeeds 5/5 on V37E00E×2).
+
+        With this on, peripheral clients (LM_Simulator port, test
+        drivers like windows_yaagc_test.py) connect via TCP and drive
+        the engine through the same path canonical Pi/Linux uses. The
+        local channel_router stays in the output chain so the LCD
+        keeps rendering even without a connected peer.
+
+        Leave off until io_callbacks.c is updated to forward and
+        app_main calls yaagc_socket_init().
+
+config AGC_YAAGC_SOCKET_PORT
+    int "TCP port for yaAGC node listener"
+    depends on AGC_YAAGC_SOCKET
+    range 1024 65535
+    default 19850
+    help
+        Port to bind on 0.0.0.0. windows_yaagc_test.py picks per-pid
+        ports above 19850 against upstream yaAGC.exe; using 19850 here
+        keeps test scripts identical between the two builds. Under
+        QEMU forward this with -nic user,hostfwd=tcp::19850-:19850.
+
+endmenu

@@ -1,0 +1,8 @@
+# Build overlay for QEMU runs. Apply with:
+#   idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.qemu" build qemu monitor
+#
+# Espressif's qemu-xtensa fork emulates the ESP32 SoC but NOT the WiFi
+# radio / PHY. Calling esp_wifi_init() in QEMU asserts in phy_init.c:338
+# and panics. Skip WiFi entirely; agc_engine, peripheral_stub,
+# channel_router, touch_input, and display_hal still run.
+CONFIG_ESPAGC_DISABLE_WIFI=y

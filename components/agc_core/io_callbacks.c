@@ -10,6 +10,16 @@
 
 #include "channel_router.h"
 
+#ifdef CONFIG_AGC_YAAGC_SOCKET
+// Canonical SocketAPI port (Task #18). When this is on, every
+// engine-cycle I/O call forwards into yaagc_socket — peripherals talk
+// to us over TCP using the same 4-byte protocol as canonical yaAGC.
+// channel_router stays in the output chain so the LCD keeps mirroring.
+extern void yaagc_socket_channel_output(agc_t *State, int Channel, int Value);
+extern int  yaagc_socket_channel_input (agc_t *State);
+extern void yaagc_socket_channel_routine(agc_t *State);
+#endif
+
 #ifdef CONFIG_AGC_TRACE_KEYRUPT1
 #include "esp_log.h"
 static const char *KEYRUPT_TAG = "keyrupt";
@@ -166,7 +176,14 @@ static void keyrupt_trace_step(agc_t *State)
 // Output: engine writes to a channel.
 void ChannelOutput(agc_t *State, int Channel, int Value)
 {
+#ifdef CONFIG_AGC_YAAGC_SOCKET
+    yaagc_socket_channel_output(State, Channel, Value);
+#else
     (void)State;
+#endif
+    // channel_router always sees outputs — even with the socket layer
+    // on, the local LCD needs to track the engine without depending on
+    // a connected TCP peer.
     channel_router_on_output(Channel, Value);
 }
 
@@ -179,7 +196,18 @@ int ChannelInput(agc_t *State)
     dispatch_trace_step(State);
     keyrupt_trace_step(State);
 #endif
+#ifdef CONFIG_AGC_YAAGC_SOCKET
+    // Canonical path: socket clients drive WriteIO + IR5 from inside
+    // ChannelInput (which is called by agc_engine once per cycle).
+    // Bypass channel_router_pump_input so we don't double-inject keys
+    // from two sources. Local LCD/touch posts still flow through
+    // channel_router_post_key → yaagc_socket would need to read them,
+    // but that wiring's a follow-up. Initial scope is "TCP drives the
+    // engine end-to-end and the LCD mirrors what comes out."
+    return yaagc_socket_channel_input(State);
+#else
     return channel_router_pump_input(State);
+#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -187,7 +215,13 @@ int ChannelInput(agc_t *State)
 // We keep it cheap and let channel_router decide what to do.
 void ChannelRoutine(agc_t *State)
 {
+#ifdef CONFIG_AGC_YAAGC_SOCKET
+    // Accept new clients and run the dead-peer ping. channel_router's
+    // periodic snapshot/log work still needs to fire either way.
+    yaagc_socket_channel_routine(State);
+#else
     (void)State;
+#endif
     channel_router_on_routine();
 }
 

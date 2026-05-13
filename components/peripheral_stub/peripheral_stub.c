@@ -100,6 +100,12 @@ static const char *PSTUB_TAG = "pstub";
 static uint64_t g_step_time_us = 0;
 static uint32_t g_pulse_phase  = 0;  // increments every step.
 
+// LM_INI deferred write — canonical Pi/Linux LM_Simulator sends these
+// ~1-2s into engine run, NOT at cycle 0. peripheral_stub_init arms a
+// countdown; peripheral_stub_tick fires the WriteIO calls when it hits 0.
+static int g_lm_ini_pending = 0;
+static int g_lm_ini_ticks_remaining = 0;
+
 // --- LM attitude state (Increment C) ------------------------------------
 // Modelled on lm_simulator.tcl's IMU state. All angles in milli-degrees
 // (integer math, no FPU on ESP32 worth depending on). 360 deg = 360000.
@@ -195,16 +201,35 @@ void peripheral_stub_init(void)
     agc_t *state = agc_core_state();
     if (state == NULL) return;
 
-    // Match LM_Simulator's startup channel writes (canonical Pi/Linux
-    // setup writes these once via write_ini_values() shortly after
-    // socket connect — see Contributed/LM_Simulator/lm_simulator.tcl:
-    // 591-600). Use direct InputChannel assignment: pre-engine boot
-    // is equivalent to the engine's ChannelInput path parsing socket
-    // packets, both populate State->InputChannel.
-    state->InputChannel[030] = LM_SIM_CH030;
-    state->InputChannel[031] = LM_SIM_CH031;
-    state->InputChannel[032] = LM_SIM_CH032;
-    state->InputChannel[033] = LM_SIM_CH033;
+    // CRITICAL TIMING: do NOT write LM_INI values at cycle 0. Canonical
+    // Pi/Linux setup has yaAGC running for ~1-2s before LM_Simulator's
+    // socket connect → write_ini_values() lands. The engine's FRESH_START
+    // sequence interprets the LM_INI arrival as part of its cold-boot
+    // hand-off (IMU coming up, etc.). If LM_INI is present at cycle 0,
+    // the engine takes a DIFFERENT path through DAPIDLER's first T5RUPT
+    // and ends in the 1/ACCSET interpretive GOTO deadlock — which our
+    // rescue chain papers over but with WarningFilter side effects that
+    // clear ch033 bit 13 (AGC WARNING input) and prevent V37E00E from
+    // completing (verified 2026-05-12 by diffing core.022 from
+    // wsl_dumps/ref vs our host_v37x2 dumps).
+    //
+    // Instead, peripheral_stub_tick will write LM_INI after a delay
+    // matching canonical's ~1s pre-LM_INI window. See g_lm_ini_pending.
+    //
+    // LM-only: the channels we initialise (ch016 MARK, ch030..033 LM
+    // discrete inputs) carry LM-specific bit assignments. Writing them
+    // on a CM rope (Comanche055) corrupts boot state — that's the
+    // second cause of the "black screen with BOOT held" symptom. Skip
+    // LM_INI entirely when running CM. CM has different startup
+    // requirements that this stub doesn't model yet (PIPA pulses,
+    // CDUs, etc.) — Phase 3 work.
+    extern int CmOrLm;
+    if (!CmOrLm) {
+        g_lm_ini_pending = 1;
+        g_lm_ini_ticks_remaining = 10;   // ~10 ChannelRoutines ≈ 1 sec sim time
+    } else {
+        ESP_LOGI(PSTUB_TAG, "CM mode: skipping LM-specific LM_INI");
+    }
 
     // No erasable-cell pre-seeding. FRESH_START_AND_RESTART.agc:430-450
     // explicitly initializes MASS, HIASCENT, DAP coefficients, RCSFLAGS,
@@ -259,6 +284,39 @@ void peripheral_stub_on_output(int channel, int value)
 #define CDUX_COUNTER  032
 #define CDUY_COUNTER  033
 #define CDUZ_COUNTER  034
+// PIPA (Pulsed Integrating Pendulous Accelerometer) counter registers.
+// Per Luminary099 ERASABLE_ASSIGNMENTS.agc:134-136. Each pulse =
+// 5.85 cm/s = 0.192 ft/s of sensed velocity along that body axis. The
+// AGC integrates these into the state vector — SERVICER picks up R(t)
+// and V(t) and feeds them to P63's ALT/HDOT/TTOGO display.
+#define PIPAX_COUNTER 037
+#define PIPAY_COUNTER 040
+#define PIPAZ_COUNTER 041
+// IncType codes (UnprogrammedIncrement, agc_engine.c:1570).
+#define PINC_TYPE 0
+#define MINC_TYPE 2
+
+// Descent thrust simulation. When g_descent_active is non-zero,
+// peripheral_stub_step fires PIPAZ- pulses each tick at a rate
+// matching DPS thrust (~10 ft/s² nominal). Off by default — turning
+// it on without a P63-active state will accumulate negative velocity
+// against zero altitude (state vector is still uninitialised). The
+// Kconfig flag CONFIG_AGC_DESCENT_THRUST_SIM gates this; web/touch
+// drivers can also toggle via peripheral_stub_set_descent_thrust().
+static int g_descent_active   = 0;
+static int g_pipa_z_remainder = 0;   // fractional accumulator
+
+// LM Block II PIPA pulse rate at 10 ft/s² thrust = 10 / 0.192 ≈ 52 Hz.
+// peripheral_stub_step is called from peripheral_stub_tick every
+// ChannelRoutine (≈ 96 ms wall, ≈ 10 Hz). So pulses per step ≈ 5.
+#define PIPA_PULSES_PER_STEP_X10  52   // tenths of pulse per step
+
+void peripheral_stub_set_descent_thrust(int active)
+{
+    g_descent_active = active ? 1 : 0;
+    ESP_LOGI(PSTUB_TAG, "descent thrust sim: %s",
+             g_descent_active ? "ON" : "OFF");
+}
 #define PCDU_INC_TYPE  1
 
 // One simulation step. Call at ~100 Hz (every 10 ms of simulated time).
@@ -353,6 +411,26 @@ void peripheral_stub_step(agc_t *state, uint32_t dt_us)
     push_cdu_delta(state, CDUX_COUNTER, &g_att_x_mdeg, &g_pimu_x_mdeg);
     push_cdu_delta(state, CDUY_COUNTER, &g_att_y_mdeg, &g_pimu_y_mdeg);
     push_cdu_delta(state, CDUZ_COUNTER, &g_att_z_mdeg, &g_pimu_z_mdeg);
+
+    // 6) Descent thrust simulation. While the LM is in powered descent
+    //    (P63/P64/P66), DPS provides ~10 ft/s² along body +Z. PIPAs
+    //    sense this as MINC pulses on PIPAZ (specific force is opposite
+    //    to the thrust velocity gain in the integration convention
+    //    Luminary uses). Fire ~5 pulses per 96 ms step ≈ 52 Hz.
+    //
+    //    P63's V06N63 display needs ALT/HDOT — those come from
+    //    SERVICER integrating these PIPA pulses against an INITIAL
+    //    STATE VECTOR (R, V at PDI). With initial state at zero (no
+    //    uplink, no V21N02), HDOT will count up but ALT will go
+    //    negative. That's expected — full P63 needs state-vector
+    //    init via uplink (Phase 3, see project memory).
+    if (g_descent_active) {
+        g_pipa_z_remainder += PIPA_PULSES_PER_STEP_X10;
+        while (g_pipa_z_remainder >= 10) {
+            UnprogrammedIncrement(state, PIPAZ_COUNTER, MINC_TYPE);
+            g_pipa_z_remainder -= 10;
+        }
+    }
 }
 
 // Stuck-job recovery via simulated GOJAM. Cold-boot Luminary's
@@ -680,6 +758,47 @@ static void force_dispatch_charin(agc_t *s)
 void peripheral_stub_tick(agc_t *state)
 {
     if (state == NULL) return;
+
+    // Deferred LM_INI — fire after the cold-boot warm-up window. See
+    // peripheral_stub_init comment for why this can't happen at cycle 0.
+    if (g_lm_ini_pending) {
+        if (g_lm_ini_ticks_remaining > 0) {
+            g_lm_ini_ticks_remaining--;
+        } else {
+#ifdef CONFIG_AGC_YAAGC_SOCKET
+            // Route through the canonical mask+value SocketAPI drain.
+            // Five channels (ch016 + ch030..033), each as a mask packet
+            // followed by a value packet — identical to the bytes the
+            // Python driver sends to yaAGC.exe. This is the path that
+            // proved 5/5; direct WriteIO from outside ChannelInput
+            // (the legacy branch below) proved 0/5 in every host test.
+            extern int yaagc_socket_inject_packet(int, int, int);
+            yaagc_socket_inject_packet(016, 0o00174, 1);
+            yaagc_socket_inject_packet(016, 0,       0);
+            yaagc_socket_inject_packet(030, 0o77777, 1);
+            yaagc_socket_inject_packet(030, LM_SIM_CH030, 0);
+            yaagc_socket_inject_packet(031, 0o77777, 1);
+            yaagc_socket_inject_packet(031, LM_SIM_CH031, 0);
+            yaagc_socket_inject_packet(032, 0o77777, 1);
+            yaagc_socket_inject_packet(032, LM_SIM_CH032, 0);
+            yaagc_socket_inject_packet(033, 0o77776, 1);
+            yaagc_socket_inject_packet(033, LM_SIM_CH033, 0);
+            ESP_LOGI(PSTUB_TAG, "LM_INI via yaagc_socket (canonical mask+value flow)");
+#else
+            WriteIO(state, 030, LM_SIM_CH030);
+            WriteIO(state, 031, LM_SIM_CH031);
+            WriteIO(state, 032, LM_SIM_CH032);
+            WriteIO(state, 033, LM_SIM_CH033);
+            ESP_LOGI(PSTUB_TAG, "LM_INI deferred-fire: ch030=%05o ch031=%05o ch032=%05o ch033=%05o",
+                     state->InputChannel[030] & 077777,
+                     state->InputChannel[031] & 077777,
+                     state->InputChannel[032] & 077777,
+                     state->InputChannel[033] & 077777);
+#endif
+            g_lm_ini_pending = 0;
+        }
+    }
+
     // ChannelRoutine fires every 8191 MCT (agc_engine.c:1944 mask
     // `ChannelRoutineCount & 017777`). One MCT = 1/AGC_PER_SECOND sec
     // = 1/85333 sec ≈ 11.72 μs of simulated time. So 8191 MCT ≈ 96 ms

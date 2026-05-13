@@ -72,6 +72,12 @@ test_ref_compare.exe: test_ref_compare.c $(HARNESS_SRCS)
 test_state_compare.exe: test_state_compare.c $(HARNESS_SRCS)
 	$(CC) $(CFLAGS) -DCONFIG_AGC_LOG_ALL_OUTPUTS=1 $(HARNESS_INC) -o $@ $^ -lm -lpthread
 
+# test_slot_writes runs V37E00E*2 stepping one instruction at a time and
+# logs every write to slot-0 (E[0][0164..0167]). Identifies the Z address
+# that writes the corrupt PRIO=030401 LOC=02146 BBCON=00401 values.
+test_slot_writes.exe: test_slot_writes.c $(HARNESS_SRCS)
+	$(CC) $(CFLAGS) -DCONFIG_AGC_LOG_ALL_OUTPUTS=1 $(HARNESS_INC) -o $@ $^ -lm -lpthread
+
 # verify-ref: run our build through the same V35E + V37E00E sequence as
 # ref_capture.py and assert no must-match channel emits values the
 # reference doesn't. Real comparison test against captured ground truth.
@@ -101,6 +107,53 @@ yaagc_ref.exe: yaagc_ref.c $(YAAGC)/agc_engine.c $(YAAGC)/agc_engine_init.c \
                $(YAAGC)/NullAPI.c $(YAAGC)/rfopen.c \
                $(PSTUB)/peripheral_stub.c
 	$(CC) $(CFLAGS) $(HARNESS_INC) -o $@ $^ -lm
+
+# test_canonical_match — strip down to canonical Pi/Linux configuration:
+# upstream agc_engine_init.c, no peripheral_stub, no channel_router, no
+# rescues. Drives V36E V37E 00E V37E 00E via direct WriteIO + IR5. Tells
+# us if our integration features are the bug.
+test_canonical_match.exe: test_canonical_match.c $(YAAGC)/agc_engine.c \
+               $(YAAGC)/agc_engine_init.c $(YAAGC)/Backtrace.c \
+               $(YAAGC)/DecodeDigitalDownlink.c $(YAAGC)/NullAPI.c \
+               $(YAAGC)/rfopen.c
+	$(CC) $(CFLAGS) $(HARNESS_INC) -o $@ $^ -lm -lpthread
+
+# test_yaagc_socket_host — host build of the canonical SocketAPI port in
+# components/yaagc_socket/. Drives the real agc_engine via socket-driven
+# ChannelInput/Output/Routine. Listens on TCP 19850; drive with
+# windows_yaagc_test.py (pointed at this exe, or just connect from any
+# canonical client). If V37E00E×2 succeeds 5/5 here, the architectural
+# fix in components/yaagc_socket/ is the right path for ESP32/QEMU too.
+YAAGC_SOCK := $(ROOT)/components/yaagc_socket
+test_yaagc_socket_host.exe: test_yaagc_socket_host.c $(YAAGC_SOCK)/yaagc_socket.c \
+                            $(YAAGC)/agc_engine.c $(YAAGC)/agc_engine_init.c \
+                            $(YAAGC)/Backtrace.c $(YAAGC)/DecodeDigitalDownlink.c \
+                            $(YAAGC)/rfopen.c
+	$(CC) $(CFLAGS) -I$(YAAGC) -I$(AGC_CORE)/include -I$(YAAGC_SOCK)/include -I. \
+	    -o $@ $^ -lm -lws2_32
+
+# test_yaagc_socket_local — drives LM_INI + keys via yaagc_socket_inject_*
+# (NO external TCP client). Proves the synthetic-client path works
+# identically to the TCP-driven path. This is what channel_router and
+# peripheral_stub will use on ESP32 to feed the canonical mask+value
+# drain that just proved 5/5 in test_yaagc_socket_host.
+test_yaagc_socket_local.exe: test_yaagc_socket_local.c $(YAAGC_SOCK)/yaagc_socket.c \
+                             $(YAAGC)/agc_engine.c $(YAAGC)/agc_engine_init.c \
+                             $(YAAGC)/Backtrace.c $(YAAGC)/DecodeDigitalDownlink.c \
+                             $(YAAGC)/rfopen.c
+	$(CC) $(CFLAGS) -I$(YAAGC) -I$(AGC_CORE)/include -I$(YAAGC_SOCK)/include -I. \
+	    -o $@ $^ -lm -lpthread -lws2_32
+
+# test_simexecute — port of canonical agc_simulator.c::SimExecute pattern.
+# 10ms wall-clock ticks, 853-cycle bursts back-to-back, SimSleep(10ms)
+# between. Same engine driver yaAGC.exe uses (which we've verified works
+# 5/5 on Windows mingw). If this passes too, the fix is "use SimExecute
+# in our integration's agc_task instead of agc_core_step+vTaskDelay".
+test_simexecute.exe: test_simexecute.c $(YAAGC)/agc_engine.c \
+               $(YAAGC)/agc_engine_init.c $(YAAGC)/Backtrace.c \
+               $(YAAGC)/DecodeDigitalDownlink.c $(YAAGC)/NullAPI.c \
+               $(YAAGC)/rfopen.c
+	$(CC) $(CFLAGS) $(HARNESS_INC) -o $@ $^ -lm -lpthread
 
 # Diagnostic-only tests — build with the same rule as LAYER2 but not
 # included in the default `run` target since they're investigation

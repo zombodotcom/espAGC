@@ -47,6 +47,14 @@ void peripheral_stub_on_output(int channel, int value);
 // where NOVAC stores priority/CADR in the wrong cells).
 void peripheral_stub_on_keypress_posted(uint8_t code);
 
+// Toggle simulated DPS descent thrust. While active, peripheral_stub_step
+// fires PIPAZ- pulses at ~52 Hz so SERVICER sees the LM as decelerating
+// along body +Z. Off by default — only useful when a powered-descent
+// program (P63/P64/P66) is selected. Without an uplinked initial state
+// vector this won't produce realistic altitude readings; it's a
+// foundation for the eventual full landing simulation.
+void peripheral_stub_set_descent_thrust(int active);
+
 #ifdef __cplusplus
 }
 #endif

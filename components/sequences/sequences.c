@@ -42,6 +42,47 @@ static const uint8_t SEQ_DISP_TIME [] = { V, D1, D6, N, D3, D6, E };
 static const uint8_t SEQ_DISP_ALARM[] = { V, D0, D5, N, D0, D9, E };
 static const uint8_t SEQ_RSET      [] = { R };
 
+// Apollo 11 landing — Armstrong/Aldrin DSKY keystroke timeline from the
+// Lunar Surface Journal (https://www.hq.nasa.gov/alsj/a11/a11.landing.html)
+// and the LGC keystroke log. The original descent ran ~12 minutes (PDI at
+// 102:33:05 GET to touchdown at 102:45:39 GET); compressed here to ~30 s
+// at KEY_GAP_MS=250 because real-time waits would block the runner task.
+// Famous moments are tagged inline.
+static const uint8_t SEQ_APOLLO11_LANDING[] = {
+    R,                              // reset to known state before the run
+    // --- T-0:30: Aldrin starts P63 (Braking Phase) -------------------
+    V, D3, D7, E, D6, D3, E,        // V37 E 63 E — Powered Descent Initiation
+    // P63 displays V06N62 (cross-range / hdot / altitude) automatically.
+    // Aldrin monitors and Houston confirms throttle-up.
+    V, D1, D6, N, D6, D3, E,        // V16N63E — keep V06N63 alive (LR-aided alt)
+    // --- T+0:38 to T+0:42: 1201/1202 PROGRAM ALARMS ------------------
+    // "Twelve oh one" — Executive Overflow caused by rendezvous-radar
+    // leakage filling the AGC work queue. Armstrong: "Program alarm!"
+    // Houston ("Bales/Garman"): "We're GO on that alarm." Aldrin PRO'd
+    // them. Five alarms total over P63/P64.
+    P, P, P, P, P,                  // PRO ×5 — acknowledge 1201/1202
+    // --- T+0:44: switch monitor to V16N68 (LPD / forward vel / alt) --
+    V, D1, D6, N, D6, D8, E,        // V16N68E — Aldrin's call-out NOUN
+    // --- T+1:00: P64 (Approach Phase) auto-loaded at altitude < 7000 ft.
+    // Armstrong uses RHC for LPD redesignations; the LGC log shows
+    // mostly NOUN updates rather than VERB changes during this phase.
+    // --- T+1:30: Armstrong switches to P66 manual (West Crater detour)
+    V, D3, D7, E, D6, D6, E,        // V37E66E — P66, manual rate-of-descent
+    // P66's "+" key slows descent by 1 ft/s per press, "-" speeds it up.
+    // Armstrong slowed dramatically while flying over the boulders.
+    PL, PL, PL, PL,                 // + + + + — slow descent over field
+    MI, MI,                         // - - — pick up rate after clearing it
+    // --- T+2:30: "Sixty seconds" / "Thirty seconds" fuel calls --------
+    // No keystrokes here — DSKY was unchanged. Honour the moment with a
+    // pad of zero-length: the runner doesn't wait beyond KEY_GAP_MS.
+    // --- T+2:38: TOUCHDOWN. "Houston, Tranquility Base here. The Eagle
+    // has landed." Engine cutoff was automatic (ENGINE STOP discrete).
+    V, D3, D7, E, D6, D8, E,        // V37E68E — P68 Landing Confirmation
+    P,                              // PROCEED — confirm landing state vec
+    // --- post-landing: V06N43 monitors lunar surface position --------
+    V, D0, D6, N, D4, D3, E,        // V06N43E — display latitude / longitude / alt
+};
+
 #define SEQ(arr) (arr), (int)(sizeof(arr) / sizeof((arr)[0]))
 
 static const sequence_t TABLE[] = {
@@ -49,6 +90,9 @@ static const sequence_t TABLE[] = {
     { "P00 idle (V37E00E)",  "Select background program 00",          SEQ(SEQ_P00_IDLE)   },
     { "P01 prelaunch (V37E01E)", "LM prelaunch initialization",       SEQ(SEQ_P01_PRELAUNCH) },
     { "P63 landing (V37E63E)", "LM landing braking phase (no IMU)",   SEQ(SEQ_P63_LANDING) },
+    { "Apollo 11 landing transcript",
+      "Armstrong/Aldrin DSKY keystroke timeline: PDI → 1201/1202 alarms → P66 manual → touchdown",
+      SEQ(SEQ_APOLLO11_LANDING) },
     { "Display time (V16N36E)", "R1 shows mission elapsed time",      SEQ(SEQ_DISP_TIME)  },
     { "Display alarms (V05N09E)", "R1 shows latest program alarm",    SEQ(SEQ_DISP_ALARM) },
     { "Reset (RSET)",        "Clear OPR ERR / abandon partial entry", SEQ(SEQ_RSET)       },

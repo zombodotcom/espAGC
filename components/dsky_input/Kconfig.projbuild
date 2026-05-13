@@ -1,7 +1,17 @@
 menu "espAGC WiFi"
 
+config ESPAGC_DISABLE_WIFI
+    bool "Disable WiFi entirely (QEMU/headless builds)"
+    default n
+    help
+        Skip dsky_input_start's WiFi initialisation. Use this for QEMU
+        builds — the Espressif QEMU fork doesn't emulate the WiFi PHY,
+        so esp_wifi_init asserts and panics. With WiFi off, the engine
+        and channel_router still run; web DSKY just isn't available.
+
 config ESPAGC_WIFI_MODE_STA
     bool "Connect to an existing WiFi network (STA mode)"
+    depends on !ESPAGC_DISABLE_WIFI
     default y
     help
         When set, the dongle joins your home/office WiFi using the SSID

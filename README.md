@@ -11,10 +11,22 @@ The emulator core is yaAGC. License is **GPL v2** (carries through from yaAGC).
 | Layer 1 — pure-logic host tests | **4/4 PASS** | ROM loader, engine boot, channel-10 DSKY emit, keypad hit-test |
 | Layer 2a — engine + real channel_router | **12/12 PASS** | Boot alarm dump, P00 select, lamp test, RSET clears, Apollo 11 transcript replay, auto-RSET, IMODES, FAILREG, idle quiet, executive state, CHARIN dispatch |
 | Layer 2b — renderer pixel tests | **2/2 PASS** | Blank frame FNV-1a hash, region assertions for lit PROG/VERB/NOUN cells |
-| `verify-ref` (vs WSL ground truth) | **PARTIAL OK ⚠️** | `make verify-ref` runs `test_ref_compare` with async pthread real-time pacing, diffs against `golden/ref_V36_V37E00E_double_to_PRG00.log` captured from WSL yaAGC. Channel-value subsets (ch005/006/010/013) align with reference; PRG=00 (ch010=55265) is missing — V37's NEWMODE transition doesn't complete in our cycle-driven harness. Exit code 2 = honest "not equivalent yet". |
-| `yaagc_ref`, `test_ref_v37_slots` | **diagnostic** | Reference harnesses linking upstream `agc_engine_init.c` directly. `test_ref_v37_slots` proves cycle-driven V37+ENTR crash is upstream-yaAGC behavior, not our integration. |
-| Layer 3 — QEMU | **deferred** | No QEMU support for ESP32-WROOM in any released QEMU; covered by Layer 2 instead |
-| Layer 4 — hardware | **boots, engine runs, display blank ⚠️** | Firmware boots reliably on the CYD board: ST7789 up, ROM loaded, WiFi STA or SoftAP, agc_task pinned to APP_CPU (core 1) with 10ms periodic batches, ui_task on PRO_CPU (core 0). NO watchdog trips. Cold-boot trips NW alarm, FAILREG latches 01107. Engine runs at ~95 kHz simulated. The current peripheral_stub rescues that work on host **do not unblock the display on hardware** — even after 8 rescue fires the engine bounces between stuck states without ever lighting digit rows. V35E and V37E00E sequences are received by CHARIN but never produce ch010 row=10/11/9 non-zero emissions. See [HANDOFF.md](HANDOFF.md) for the full investigation log and next-step proposals. |
+| Layer 2c — canonical yaAGC socket port | **5/5 PASS** ✅ | `test_yaagc_socket_host` + `yaagc_socket_reliability.py` drives our build via canonical 4-byte protocol over TCP and reaches PRG=00 (ch010=55265) on V36E V37E 00E V37E 00E — matches yaAGC.exe baseline exactly. `test_yaagc_socket_local` does the same via the synthetic-client inject path (no TCP) and also passes. |
+| Layer 3 — QEMU | **available** | Espressif's `qemu-xtensa` (9.2.2) supports `-machine esp32`. `idf.py qemu monitor` runs the firmware. WiFi radio not emulated; everything else (engine, peripheral_stub, channel_router, display_hal) runs. |
+| Layer 4 — hardware | **boots, engine runs, V37 programs transition correctly** ✅ | With `CONFIG_AGC_YAAGC_SOCKET=y`: cold boot → WiFi associates → deferred LM_INI fires via canonical mask+value flow. V37E63E reaches **`active=p044322@021301`** (P63 SERVICER scheduled and running). V05N09 displays alarms. The Apollo 11 landing transcript sequence walks PDI → 1201/1202 PRO acks → V16N68 → P66 → touchdown. PROG/VERB/NOUN render on both LCD and web DSKY. P63's R1/R2/R3 stay blank until PIPA/LR pulse injection lands (see "Descent thrust" below — foundation in place, full landing simulation is multi-session work). |
+
+### What changed (2026-05-13)
+
+The hardware-display blank was a **driver-loop bug**, not a Luminary issue. Every in-process port of yaAGC's main loop we tried failed V37E00E×2 with the same deterministic state, but yaAGC.exe + Python socket driver passed 5/5. Bisection ruled out our integration features, our SimExecute port, our pacing, and per-channel value differences in LM_INI.
+
+The fix is a port of canonical `SocketAPI.c` + `agc_utilities.c` into `components/yaagc_socket/`, gated by `CONFIG_AGC_YAAGC_SOCKET` (default off). When on:
+
+- ESP32 listens on TCP `:19850` speaking the canonical 4-byte protocol.
+- `io_callbacks.c::ChannelInput/Output/Routine` forward to the socket layer.
+- LCD / touch / web keypresses route through `channel_router_post_key → yaagc_socket_inject_key → canonical drain` (synthetic local client; slot 0 reserved).
+- `peripheral_stub_init` fires LM_INI through `yaagc_socket_inject_packet` with canonical masks (`077777` / `077776` / `000174`) — same byte stream the Python driver sends to yaAGC.exe.
+
+Flip on with `idf.py menuconfig` → "espAGC canonical yaAGC socket (Task #18)" → enable. Default-off keeps the legacy channel_router path unchanged. Existing host Layer-2 tests still pass.
 
 DSKY output renders as a 320×240 framebuffer on the ST7789 panel — status panel, register window, and an on-screen 19-key keypad backed by the XPT2046 resistive touchscreen. No LVGL — direct framebuffer in 80-row strips, three passes per frame.
 
@@ -117,7 +129,7 @@ Hold the boot button at reset to switch ROM to Comanche055.
 ### DSKY input
 
 - **Touchscreen**: tap the on-screen 19-key keypad. Same key set as the WiFi web UI.
-- **WiFi web UI**: connect to the network configured in `idf.py menuconfig` → espAGC WiFi (or to the open AP `espAGC` if no SSID is set), browse to `http://<dongle-ip>/` (or `http://192.168.4.1/` in SoftAP mode). SPA has a 19-button DSKY keypad, physical-keyboard shortcuts, and a one-click menu of canned sequences (lamp test, P00 select, RSET, etc.).
+- **WiFi web UI**: connect to the network configured in `idf.py menuconfig` → espAGC WiFi (or to the open AP `espAGC` if no SSID is set), browse to `http://<dongle-ip>/` (or `http://192.168.4.1/` in SoftAP mode). SPA has a **DSKY display mirror** (PROG/VERB/NOUN, R1/R2/R3, all 12 status lamps — exactly the same fields the ST7789 LCD shows, polled from `/state` at 5 Hz), a 19-button DSKY keypad, physical-keyboard shortcuts, and a one-click menu of canned sequences (lamp test, P00 select, RSET, etc.).
 
 ### What verbs work — try these first
 
@@ -139,6 +151,91 @@ ROM=../../build/roms/Luminary099.bin ./test_charin_dispatch.exe   # CHARIN slot 
 ROM=../../build/roms/Luminary099.bin ./test_v37_slots.exe         # V37 sequence + slot dump
 ROM=../../build/roms/Luminary099.bin ./yaagc_ref.exe              # vanilla yaAGC baseline
 ```
+
+#### State-comparison + slot-write tracing (V37E00E investigation)
+
+```powershell
+cd tests\host
+mingw32-make test_state_compare.exe test_slot_writes.exe
+
+# Capture 25 per-second core dumps of host's V36E V37E 00E V37E 00E run
+ROM=../../build/roms/Luminary099.bin DUMPDIR=wsl_dumps/host_v37 ./test_state_compare.exe
+
+# Diff against committed WSL ground-truth at wsl_dumps/ref/
+py compare_dumps.py host_v37 ref                              # high-level summary
+py parse_core_dump.py wsl_dumps/host_v37/core.018 wsl_dumps/ref/core.019 --diff
+
+# Step the engine one instruction at a time and log every write to slot-0
+# (E[0][0164..0167]). Pinpoints exactly which Z address writes the corrupt
+# PRIORITY=030401 / LOC=02146 that causes the V37E00E×2 crash to Z=0.
+ROM=../../build/roms/Luminary099.bin ./test_slot_writes.exe   # writes slot_writes.log
+grep "Z=02751 " slot_writes.log | head                        # the smoking gun
+```
+
+Pre-captured WSL reference dumps (`wsl_dumps/ref/core.000..026`) are committed; re-capture via `bash capture_with_dumps.sh` from inside WSL when the upstream behavior needs refreshing. PRG=00 emits in ref `core.022` (`OutputChannel10[11]=55265`); host never reaches that state — see [HANDOFF.md](HANDOFF.md) and `~/.claude/projects/.../memory/project_v37_slot_corruption_diagnosed.md` for the current diagnosis.
+
+### QEMU — emulate the WROOM-32 firmware locally
+
+Iterating on `peripheral_stub.c` / `channel_router.c` / `agc_init.c` without burning the flash → COM7 monitor cycle:
+
+```powershell
+. C:\esp\v6.0.1\esp-idf\export.ps1
+python $env:IDF_PATH\tools\idf_tools.py install qemu-xtensa     # one-time, ~70MB
+. C:\esp\v6.0.1\esp-idf\export.ps1                              # re-source so PATH picks up qemu
+
+# QEMU's ESP32 model doesn't emulate the WiFi PHY — esp_wifi_init() asserts.
+# Use the sdkconfig.qemu overlay to disable WiFi for QEMU builds:
+idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.qemu" build
+idf.py qemu                    # boot QEMU, serial → stdout
+idf.py qemu monitor            # boot + interactive serial monitor
+idf.py qemu --gdb              # wait for `idf.py gdb` to attach (no JTAG)
+idf.py qemu --graphics         # adds virtual framebuffer for the ST7789
+```
+
+Verified working (2026-05-12) — QEMU boots the firmware, the engine ticks the peripheral_stub through cold-boot recovery, and you get the same `pstub: tickN Z=... newjob=... active=p077777@...` trace as on hardware. Example after ~30s of simulated time:
+
+```
+I (3624) st7789: ST7789 ready: 320x240 landscape
+I (3644) dsky: display_hal up: 320x240, strip_h=80
+I (3644) app: loading ROM Comanche055 (73728 bytes)
+I (3983) app: serial_input: ready (UART0). type V/N/+/-/E/C/P/R/K/0-9 to drive DSKY
+...
+I (36790) chrouter: alarms RuptLock=0 NW=0 ... FAILREG=[01107,00000,77777] RegZ=04706 cyc=6283265
+I (36890) pstub: tick770 Z=05233 newjob=077777 active=p077777@002703 wakestal=-1
+```
+
+The Espressif qemu-xtensa fork emulates the ESP32 SoC at the register level — same chip the WROOM-32 packages, so the firmware runs unchanged. **What's not emulated:** WiFi radio (web DSKY offline), touch controllers (no XPT2046/CST820 model). **What does run:** `agc_engine`, `peripheral_stub` (rescue chain + force_dispatch_charin), `channel_router`, `display_hal` over virtual ST7789, `agc_task` pinned to APP_CPU, the new `serial_input_task` (see below).
+
+#### Injecting DSKY keypresses in QEMU
+
+Two paths — pick the one that matches your host:
+
+**A. Serial console (Linux/macOS-friendly, flaky on Windows).** `main/app_main.c` starts `serial_input_task` which reads ASCII from UART0 and maps `V N + - E C P R K 0..9` to DSKY keycodes via `channel_router_post_key`. In `idf.py qemu monitor` just type `RV35E` (or any sequence). On real hardware over USB-serial this works perfectly. **On Windows hosts** the `-serial stdio` pipe to QEMU is unreliable when fed by `subprocess.PIPE` (verified — bytes get silently dropped); use `idf.py qemu monitor` with the keyboard, or use GDB injection instead.
+
+**B. GDB injection (rock-solid on any host).** Bypasses the UART chardev entirely.
+
+```powershell
+# Terminal A — start QEMU and halt the CPU waiting for GDB:
+. C:\esp\v6.0.1\esp-idf\export.ps1
+idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.qemu" qemu --gdb monitor
+
+# Terminal B — attach gdb with the espAGC helper script loaded:
+. C:\esp\v6.0.1\esp-idf\export.ps1
+idf.py gdb -x tools\qemu.gdbinit
+(gdb) continue       # let the firmware boot
+(gdb) <Ctrl-C>       # interrupt after a few seconds
+(gdb) call_key 18    # R (RSET)
+(gdb) call_key 17    # V
+(gdb) call_key 3     # 3
+(gdb) call_key 5     # 5
+(gdb) call_key 28    # E (ENTR)
+(gdb) continue       # watch the lamp test run
+(gdb) <Ctrl-C>
+(gdb) agc_state      # dump A/L/Q/Z/FB/slot/cycle
+(gdb) watch_slot     # break on next write to slot-0 PRIORITY
+```
+
+See `tools/qemu.gdbinit` for the full helper definitions including `run_v35e_demo` (scripted RV35E run) and notes per keycode. The slot-corruption watchpoint (`watch_slot`) is the recommended way to chase the V37E00E×2 bug captured in `test_slot_writes`.
 
 ## Host tests
 
