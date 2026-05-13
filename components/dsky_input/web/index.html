@@ -1,185 +1,487 @@
 <!doctype html>
 <html lang="en">
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>espAGC DSKY</title>
 <style>
-  :root { color-scheme: dark; }
-  body  { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-          background:#000; color:#eee; margin:0; padding:1rem;
-          max-width: 22rem; }
-  h1    { font-size:1rem; margin:0 0 .8rem; color:#FFB000; }
-  h2    { font-size:.8rem; margin:1rem 0 .4rem; color:#FFB000;
-          text-transform: uppercase; letter-spacing: .1em; }
-  .pad  { display:grid; grid-template-columns:repeat(3, 4rem); gap:.5rem; }
-  .seqs { display:flex; flex-direction:column; gap:.3rem; }
-  button.key { font:inherit; padding:.6rem; background:#222; color:#FFB000;
-               border:1px solid #444; border-radius:.4rem; cursor:pointer; }
-  button.key:active { background:#444; }
-  button.verb,button.noun,button.entr,button.pro,
-  button.rset,button.clr,button.krel { background:#332600; color:#FFD060; }
-  button.seq { font:inherit; padding:.5rem .7rem; background:#101820;
-               color:#9ec5e8; border:1px solid #2a4055; border-radius:.4rem;
-               text-align:left; cursor:pointer; font-size:.85rem; }
-  button.seq:hover  { background:#15222e; }
-  button.seq:active { background:#1f2f3e; }
-  button.seq small  { display:block; opacity:.6; font-size:.75rem; margin-top:.15rem; }
-  .log  { margin-top:1rem; font-size:.8rem; opacity:.6; max-height:6rem; overflow:auto; }
+  :root {
+    color-scheme: dark;
+    --amber:   #FFB000;
+    --amber-d: #FFD060;
+    --amber-g: #FFB00060;
+    --bg:      #0a0a0a;
+    --bg-2:    #111418;
+    --bg-3:    #181c22;
+    --line:    #2a2f36;
+    --line-2:  #3a4250;
+    --text:    #d8dde3;
+    --mute:    #7a828c;
+    --blue:    #9ec5e8;
+    --blue-bg: #101820;
+    --blue-bd: #2a4055;
+    --green:   #58d68d;
+    --red:     #ff6b6b;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: var(--bg);
+    color: var(--text);
+    margin: 0;
+    padding: 0;
+    -webkit-font-smoothing: antialiased;
+  }
 
-  /* DSKY mirror panel — mirrors what the ST7789 LCD shows on hardware. */
-  .dsky { background:#0a0a0a; border:1px solid #2a2a2a; border-radius:.4rem;
-          padding:.7rem; margin-bottom:.4rem; }
-  .dsky .lamps { display:grid; grid-template-columns:repeat(4, 1fr);
-                 gap:.3rem; margin-bottom:.5rem; font-size:.65rem;
-                 letter-spacing:.05em; }
-  .dsky .lamp  { background:#181818; color:#444; padding:.2rem .3rem;
-                 text-align:center; border-radius:.2rem;
-                 border:1px solid #222; }
-  .dsky .lamp.on { background:#2a1f00; color:#FFB000; border-color:#5a4000;
-                   box-shadow: inset 0 0 4px #6b4d00; }
-  .dsky .regs  { font-family: "Courier New", monospace; }
-  .dsky .pvn   { display:grid; grid-template-columns:repeat(3, 1fr);
-                 column-gap:.6rem; padding:.2rem 0; }
-  .dsky .pvn .field { text-align:center; }
-  .dsky .pvn .label { color:#888; font-size:.6rem; letter-spacing:.1em; }
-  .dsky .pvn .digits { color:#FFB000; font-size:1.4rem; letter-spacing:.1em;
-                       text-shadow: 0 0 6px #FFB00060; }
+  /* Top bar */
+  .topbar {
+    display: flex; align-items: center; gap: 1rem;
+    padding: .55rem .9rem;
+    background: linear-gradient(180deg, #14181d, #0a0c0f);
+    border-bottom: 1px solid var(--line);
+    position: sticky; top: 0; z-index: 5;
+  }
+  .topbar h1 {
+    font-size: .95rem; margin: 0; color: var(--amber);
+    letter-spacing: .08em;
+  }
+  .topbar .meta { color: var(--mute); font-size: .75rem; margin-left: auto; }
+  .topbar .led {
+    display: inline-block; width: .55rem; height: .55rem;
+    border-radius: 50%; background: #444; margin-right: .35rem;
+    vertical-align: 1px;
+  }
+  .topbar .led.ok  { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .topbar .led.bad { background: var(--red);   box-shadow: 0 0 6px var(--red);   }
+
+  /* Layout */
+  .app {
+    display: grid; gap: 1rem; padding: 1rem;
+    grid-template-columns: 1fr;
+    align-items: start;
+  }
+  @media (min-width: 760px) {
+    .app { grid-template-columns: minmax(320px, 380px) minmax(220px, 280px) 1fr; }
+    .col-device  { position: sticky; top: 3rem; }
+    .col-keypad  { position: sticky; top: 3rem; }
+  }
+  @media (min-width: 1180px) {
+    .app { grid-template-columns: 380px 280px 1fr 320px; }
+  }
+
+  /* Card */
+  .card {
+    background: var(--bg-2);
+    border: 1px solid var(--line);
+    border-radius: .55rem;
+    padding: .7rem .8rem;
+    margin-bottom: .8rem;
+  }
+  .card h2 {
+    font-size: .72rem; margin: 0 0 .55rem; color: var(--amber);
+    text-transform: uppercase; letter-spacing: .12em; font-weight: 600;
+  }
+  .card h2 .hint { color: var(--mute); font-weight: 400; letter-spacing: .03em;
+                    text-transform: none; margin-left: .5rem; font-size: .7rem; }
+
+  /* DSKY display */
+  .dsky {
+    background: #060708;
+    border: 1px solid #1a1d22;
+    border-radius: .45rem;
+    padding: .8rem;
+  }
+  .dsky .lamps {
+    display: grid; grid-template-columns: repeat(4, 1fr);
+    gap: .3rem; margin-bottom: .55rem; font-size: .6rem;
+    letter-spacing: .04em;
+  }
+  .dsky .lamp {
+    background: #121418; color: #3c4047;
+    padding: .25rem .25rem; text-align: center;
+    border-radius: .2rem; border: 1px solid #1c1f24;
+    cursor: help;
+  }
+  .dsky .lamp.on {
+    background: #2a1f00; color: var(--amber);
+    border-color: #5a4000;
+    box-shadow: inset 0 0 4px #6b4d00;
+  }
+  .dsky .pvn {
+    display: grid; grid-template-columns: repeat(3, 1fr);
+    column-gap: .6rem; padding: .15rem 0 .35rem;
+    border-bottom: 1px dashed #1a1d22;
+  }
+  .dsky .pvn .field { text-align: center; }
+  .dsky .pvn .label { color: #888; font-size: .58rem; letter-spacing: .12em; }
+  .dsky .pvn .digits {
+    color: var(--amber); font-size: 1.6rem; letter-spacing: .08em;
+    text-shadow: 0 0 8px var(--amber-g);
+    font-family: "Courier New", monospace; line-height: 1.15;
+  }
   .dsky .pvn .digits.flash { animation: flash 1s steps(1) infinite; }
+  .dsky .pvn .decode {
+    color: var(--mute); font-size: .6rem; min-height: .85rem;
+    margin-top: .1rem; letter-spacing: .03em;
+  }
   @keyframes flash { 50% { opacity: 0.25; } }
-  .dsky .r     { color:#FFB000; font-size:1.2rem; padding:.1rem 0;
-                 text-shadow: 0 0 6px #FFB00060; }
-  .dsky .r .sign { display:inline-block; width:1.2ch; }
-  .dsky .r .num  { letter-spacing:.05em; }
-  .dsky .r .rlabel { color:#888; font-size:.7rem; margin-right:.6rem; }
-  .dsky .blank { color:#332600; }   /* dim segments behind a blank digit */
+  .dsky .r {
+    color: var(--amber); font-size: 1.25rem; padding: .15rem 0;
+    text-shadow: 0 0 6px var(--amber-g);
+    font-family: "Courier New", monospace;
+    display: flex; align-items: baseline; gap: .55rem;
+  }
+  .dsky .r .rlabel { color: #888; font-size: .68rem; min-width: 1.4rem; }
+  .dsky .r .num { letter-spacing: .08em; }
+  .dsky .blank { color: #332600; }
+  .dsky .r .dec { color: var(--mute); font-size: .65rem; margin-left: auto; }
+
+  /* Keypad */
+  .pad {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: .35rem;
+  }
+  button.key {
+    font: inherit; padding: .65rem .35rem;
+    background: #1d2128; color: var(--amber);
+    border: 1px solid #2a2f36; border-radius: .4rem;
+    cursor: pointer; transition: background .08s ease;
+    font-size: .85rem;
+  }
+  button.key:hover  { background: #252a32; }
+  button.key:active { background: #3a4250; }
+  button.verb, button.noun, button.entr,
+  button.pro,  button.rset, button.clr, button.krel {
+    background: #2a1f00; color: var(--amber-d); border-color: #4a3400;
+  }
+  button.verb:hover, button.noun:hover, button.entr:hover,
+  button.pro:hover,  button.rset:hover, button.clr:hover, button.krel:hover {
+    background: #3a2c00;
+  }
+  button.entr { grid-column: 3; }
+  button.krel { grid-column: 1 / -1; }
+
+  /* Sequences */
+  .seqgroup { margin-bottom: .55rem; }
+  .seqgroup h3 {
+    font-size: .65rem; margin: 0 0 .35rem; color: var(--blue);
+    text-transform: uppercase; letter-spacing: .1em; opacity: .85;
+  }
+  .seqgrid {
+    display: grid; gap: .4rem;
+    grid-template-columns: 1fr;
+  }
+  @media (min-width: 1180px) { .seqgrid { grid-template-columns: 1fr 1fr; } }
+  button.seq {
+    font: inherit; padding: .5rem .65rem;
+    background: var(--blue-bg); color: var(--blue);
+    border: 1px solid var(--blue-bd); border-radius: .4rem;
+    text-align: left; cursor: pointer;
+    font-size: .8rem; line-height: 1.25;
+    display: flex; flex-direction: column; gap: .15rem;
+    transition: background .08s ease, border-color .08s ease;
+  }
+  button.seq:hover  { background: #15222e; border-color: #3a587a; }
+  button.seq:active { background: #1f2f3e; }
+  button.seq .name { color: #c4dcee; font-weight: 500; }
+  button.seq .desc {
+    color: #6f8aa4; font-size: .68rem;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  /* Thrust panel */
+  .thrust {
+    display: flex; align-items: stretch; gap: .55rem;
+  }
+  .thrust button {
+    flex: 1; font: inherit; padding: .55rem .65rem;
+    background: var(--blue-bg); color: var(--blue);
+    border: 1px solid var(--blue-bd); border-radius: .4rem;
+    text-align: left; cursor: pointer; font-size: .8rem;
+  }
+  .thrust button[data-on="1"] {
+    background: #2e1010; color: #ffb0b0; border-color: #5a2828;
+  }
+  .thrust .state {
+    min-width: 4.2rem; padding: .45rem .5rem;
+    border: 1px solid var(--line); border-radius: .4rem;
+    background: #0e1115; color: var(--mute); font-size: .7rem;
+    text-align: center; display: flex; flex-direction: column;
+    justify-content: center; align-items: center; gap: .15rem;
+  }
+  .thrust .state .v { font-size: .85rem; color: var(--mute); letter-spacing: .1em; }
+  .thrust .state.on .v { color: var(--red); }
+  .thrust .state.on    { border-color: #5a2828; background: #1a0e0e; }
+
+  /* Log */
+  .log {
+    margin: 0; padding: .55rem .65rem;
+    font-size: .72rem; color: var(--mute);
+    background: #07090b; border: 1px solid var(--line);
+    border-radius: .4rem;
+    max-height: 14rem; overflow: auto;
+    white-space: pre-wrap; word-break: break-all;
+  }
+  .log .ok  { color: var(--blue); }
+  .log .err { color: var(--red);  }
+  .log .run { color: var(--amber); }
+
+  /* Reference table */
+  .ref { font-size: .68rem; color: var(--mute); line-height: 1.55; }
+  .ref code { color: var(--blue); background: #0e1115; padding: 0 .25rem; border-radius: .2rem; }
 </style>
 
-<h1>espAGC — virtual DSKY</h1>
+<div class="topbar">
+  <h1>espAGC — virtual DSKY</h1>
+  <span class="meta">
+    <span class="led" id="conn-led"></span><span id="conn-text">connecting…</span>
+    &nbsp;·&nbsp; gen <span id="gen-num">—</span>
+  </span>
+</div>
 
-<div class="dsky" id="dsky">
-  <div class="lamps">
-    <div class="lamp" id="L_ca">COMP&nbsp;ACTY</div>
-    <div class="lamp" id="L_up">UPLINK&nbsp;ACTY</div>
-    <div class="lamp" id="L_temp">TEMP</div>
-    <div class="lamp" id="L_noatt">NO&nbsp;ATT</div>
-    <div class="lamp" id="L_gl">GIMBAL&nbsp;LOCK</div>
-    <div class="lamp" id="L_pa">PROG</div>
-    <div class="lamp" id="L_rstr">RESTART</div>
-    <div class="lamp" id="L_trk">TRACKER</div>
-    <div class="lamp" id="L_krel">KEY&nbsp;REL</div>
-    <div class="lamp" id="L_oe">OPR&nbsp;ERR</div>
-    <div class="lamp" id="L_stby">STBY</div>
-    <div class="lamp" id="L_fvn">V/N&nbsp;FLASH</div>
-  </div>
-  <div class="regs">
-    <div class="pvn">
-      <div class="field"><div class="label">PROG</div><div class="digits" id="prog">__</div></div>
-      <div class="field"><div class="label">VERB</div><div class="digits" id="verb">__</div></div>
-      <div class="field"><div class="label">NOUN</div><div class="digits" id="noun">__</div></div>
+<div class="app">
+
+  <!-- DSKY display column -->
+  <div class="col-device">
+    <div class="card">
+      <h2>DSKY display <span class="hint">live mirror of ST7789 LCD</span></h2>
+      <div class="dsky" id="dsky">
+        <div class="lamps">
+          <div class="lamp" id="L_ca"    title="Computer activity">COMP&nbsp;ACTY</div>
+          <div class="lamp" id="L_up"    title="Uplink activity (UPRUPT)">UPLINK&nbsp;ACTY</div>
+          <div class="lamp" id="L_temp"  title="IMU coolant out of temperature band">TEMP</div>
+          <div class="lamp" id="L_noatt" title="IMU not aligned — no attitude reference">NO&nbsp;ATT</div>
+          <div class="lamp" id="L_gl"    title="Middle gimbal &gt; 70°">GIMBAL&nbsp;LOCK</div>
+          <div class="lamp" id="L_pa"    title="Program alarm — see V05N09">PROG</div>
+          <div class="lamp" id="L_rstr"  title="Computer restart occurred">RESTART</div>
+          <div class="lamp" id="L_trk"   title="Tracker (radar) fault">TRACKER</div>
+          <div class="lamp" id="L_krel"  title="Computer wants the keyboard released">KEY&nbsp;REL</div>
+          <div class="lamp" id="L_oe"    title="Operator error — bad keystroke sequence">OPR&nbsp;ERR</div>
+          <div class="lamp" id="L_stby"  title="Standby mode">STBY</div>
+          <div class="lamp" id="L_fvn"   title="Verb/Noun flashing — input wanted">V/N&nbsp;FLASH</div>
+        </div>
+        <div class="pvn">
+          <div class="field">
+            <div class="label">PROG</div>
+            <div class="digits" id="prog">__</div>
+            <div class="decode" id="prog-name">&nbsp;</div>
+          </div>
+          <div class="field">
+            <div class="label">VERB</div>
+            <div class="digits" id="verb">__</div>
+            <div class="decode" id="verb-name">&nbsp;</div>
+          </div>
+          <div class="field">
+            <div class="label">NOUN</div>
+            <div class="digits" id="noun">__</div>
+            <div class="decode" id="noun-name">&nbsp;</div>
+          </div>
+        </div>
+        <div class="r"><span class="rlabel">R1</span><span class="num" id="r1">______</span></div>
+        <div class="r"><span class="rlabel">R2</span><span class="num" id="r2">______</span></div>
+        <div class="r"><span class="rlabel">R3</span><span class="num" id="r3">______</span></div>
+      </div>
     </div>
-    <div class="r"><span class="rlabel">R1</span><span class="num" id="r1">______</span></div>
-    <div class="r"><span class="rlabel">R2</span><span class="num" id="r2">______</span></div>
-    <div class="r"><span class="rlabel">R3</span><span class="num" id="r3">______</span></div>
   </div>
+
+  <!-- Keypad column -->
+  <div class="col-keypad">
+    <div class="card">
+      <h2>Keypad <span class="hint">click or type on keyboard</span></h2>
+      <div class="pad">
+        <button class="key verb"  data-key="VRB">VERB</button>
+        <button class="key noun"  data-key="NUN">NOUN</button>
+        <button class="key rset"  data-key="RSET">RSET</button>
+
+        <button class="key" data-key="7">7</button>
+        <button class="key" data-key="8">8</button>
+        <button class="key" data-key="9">9</button>
+
+        <button class="key" data-key="4">4</button>
+        <button class="key" data-key="5">5</button>
+        <button class="key" data-key="6">6</button>
+
+        <button class="key" data-key="1">1</button>
+        <button class="key" data-key="2">2</button>
+        <button class="key" data-key="3">3</button>
+
+        <button class="key clr"   data-key="CLR">CLR</button>
+        <button class="key" data-key="0">0</button>
+        <button class="key entr"  data-key="ENTR">ENTR</button>
+
+        <button class="key" data-key="+">+</button>
+        <button class="key" data-key="-">-</button>
+        <button class="key pro"   data-key="PRO">PRO</button>
+
+        <button class="key krel"  data-key="KREL">KEY&nbsp;REL</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Descent thrust <span class="hint">PIPAZ pulses ~52 Hz</span></h2>
+      <div class="thrust">
+        <button id="thrust-toggle" data-on="0">
+          Start descent thrust
+        </button>
+        <div class="state" id="thrust-state"><div class="v" id="thrust-state-v">OFF</div></div>
+      </div>
+      <div class="ref" style="margin-top:.45rem">
+        Drives PIPAZ− pulses through the canonical drain so SERVICER sees the LM decelerating.
+        HDOT in <code>V16N63E</code> counts up. ALT goes negative without an initial state vector
+        — run <em>Houston uplinks Apollo 11 PDI state (V71)</em> first.
+      </div>
+    </div>
+  </div>
+
+  <!-- Sequences column -->
+  <div class="col-seqs">
+    <div class="card">
+      <h2>Canned sequences <span class="hint" id="seq-count"></span></h2>
+      <div id="seqs">loading…</div>
+    </div>
+  </div>
+
+  <!-- Reference + log column (4-col layout only) -->
+  <div class="col-log">
+    <div class="card">
+      <h2>Activity log</h2>
+      <pre class="log" id="log"></pre>
+    </div>
+    <div class="card">
+      <h2>Quick reference</h2>
+      <div class="ref">
+        <div><code>V35E</code> — lamp test</div>
+        <div><code>V37 EnnE</code> — change major mode to program nn</div>
+        <div><code>V16 NnnE</code> — monitor (live update) noun nn</div>
+        <div><code>V05 N09E</code> — display program alarm code</div>
+        <div><code>V21 N…E</code> — load value</div>
+        <div><code>V25 N…E</code> — load three values</div>
+        <div><code>V71</code> — contiguous block uplink (UPRUPT)</div>
+        <div><code>N17</code> — attitude error, <code>N36</code> — mission time</div>
+        <div><code>N63</code> — ALT/HDOT/TTOGO during P63/P66</div>
+        <div style="margin-top:.5rem;color:#5a6772">PRO = proceed · KREL = key release · RSET = reset</div>
+      </div>
+    </div>
+  </div>
+
 </div>
-
-<h2>Keypad</h2>
-<div class="pad">
-  <button class="key verb"  data-key="VRB">VERB</button>
-  <button class="key noun"  data-key="NUN">NOUN</button>
-  <button class="key rset"  data-key="RSET">RSET</button>
-
-  <button class="key" data-key="7">7</button><button class="key" data-key="8">8</button><button class="key" data-key="9">9</button>
-  <button class="key" data-key="4">4</button><button class="key" data-key="5">5</button><button class="key" data-key="6">6</button>
-  <button class="key" data-key="1">1</button><button class="key" data-key="2">2</button><button class="key" data-key="3">3</button>
-
-  <button class="key clr"   data-key="CLR">CLR</button>
-  <button class="key" data-key="0">0</button>
-  <button class="key entr"  data-key="ENTR">ENTR</button>
-
-  <button class="key" data-key="+">+</button><button class="key" data-key="-">-</button>
-  <button class="key pro"   data-key="PRO">PRO</button>
-
-  <button class="key krel"  data-key="KREL">KEY&nbsp;REL</button>
-</div>
-
-<h2>Canned sequences</h2>
-<div class="seqs" id="seqs">loading…</div>
-
-<h2>Descent thrust simulator</h2>
-<button class="seq" id="thrust-toggle" data-on="0">
-  Start descent thrust (PIPAZ pulses ~52 Hz)
-  <small>Foundation for P63/P66 — fires PIPAZ- pulses through the canonical drain so SERVICER sees the LM decelerating. HDOT in V16N63E should count up. ALT will go negative without an initial state vector (Phase 3 work).</small>
-</button>
-
-<pre class="log" id="log"></pre>
 
 <script>
-  const log = (m) => {
-    const el = document.getElementById('log');
-    el.textContent = (m + '\n' + el.textContent).slice(0, 2000);
+  const $ = (id) => document.getElementById(id);
+
+  /* ---------- log ---------- */
+  const log = (m, cls) => {
+    const el = $('log');
+    const ts = new Date().toLocaleTimeString([], { hour12: false });
+    const line = document.createElement('div');
+    if (cls) line.className = cls;
+    line.textContent = ts + '  ' + m;
+    el.insertBefore(line, el.firstChild);
+    while (el.childElementCount > 200) el.lastChild.remove();
   };
+
+  /* ---------- keys ---------- */
   const sendKey = (k) =>
     fetch('/key', { method: 'POST', body: k })
-      .then(r => log((r.ok ? '→ ' : 'X ') + k))
-      .catch(e => log('err: ' + e));
-  const runSeq = (i, name) =>
-    fetch('/seq', { method: 'POST', body: String(i) })
-      .then(async r => {
-        if (r.ok) log('▶ ' + name);
-        else      log('X ' + name + ' (' + r.status + ' ' + (await r.text()) + ')');
-      })
-      .catch(e => log('err: ' + e));
+      .then(r => log((r.ok ? '→ ' : '✗ ') + k, r.ok ? 'ok' : 'err'))
+      .catch(e => log('err: ' + e, 'err'));
 
   document.querySelectorAll('button.key').forEach(b => {
     b.addEventListener('click', () => sendKey(b.dataset.key));
   });
   addEventListener('keydown', (e) => {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
     const map = {
-      Enter:'ENTR', Backspace:'CLR',
-      v:'VRB', V:'VRB', n:'NUN', N:'NUN', p:'PRO', P:'PRO',
-      r:'RSET', R:'RSET', k:'KREL', K:'KREL',
+      Enter: 'ENTR', Backspace: 'CLR',
+      v: 'VRB', V: 'VRB', n: 'NUN', N: 'NUN', p: 'PRO', P: 'PRO',
+      r: 'RSET', R: 'RSET', k: 'KREL', K: 'KREL',
     };
     const tok = map[e.key] ?? (/^[0-9+\-]$/.test(e.key) ? e.key : null);
-    if (tok) sendKey(tok);
+    if (tok) { e.preventDefault(); sendKey(tok); }
   });
 
-  const thrustBtn = document.getElementById('thrust-toggle');
-  if (thrustBtn) {
-    thrustBtn.addEventListener('click', () => {
-      const next = thrustBtn.dataset.on === '1' ? '0' : '1';
-      fetch('/thrust', { method: 'POST', body: next })
-        .then(r => {
-          if (!r.ok) throw new Error('HTTP ' + r.status);
-          thrustBtn.dataset.on = next;
-          thrustBtn.firstChild.textContent =
-            next === '1' ? 'Stop descent thrust' : 'Start descent thrust (PIPAZ pulses ~52 Hz)';
-          log((next === '1' ? '▶' : '■') + ' descent thrust');
-        })
-        .catch(e => log('thrust err: ' + e));
-    });
-  }
+  /* ---------- sequence categorization ---------- */
+  // Heuristic groups based on sequence name keywords. The /seqs endpoint
+  // doesn't tag, so this is the cleanest place to do it.
+  const categorize = (s) => {
+    const n = (s.name + ' ' + s.desc).toLowerCase();
+    if (/houston|uplink|uprupt|v71/.test(n))   return 'Uplinks (Houston)';
+    if (/apollo 11|transcript|landing/.test(n)
+        && !/v37e63e/.test(s.name.toLowerCase())) return 'Mission';
+    if (/p00|p01|p63|v37/.test(n))             return 'Programs';
+    if (/display|v16|v05/.test(n))             return 'Telemetry';
+    return 'Diagnostics';
+  };
+  const groupOrder = [
+    'Programs', 'Telemetry', 'Mission', 'Uplinks (Houston)', 'Diagnostics',
+  ];
+
+  const runSeq = (i, name) =>
+    fetch('/seq', { method: 'POST', body: String(i) })
+      .then(async r => {
+        if (r.ok) log('▶ ' + name, 'run');
+        else      log('✗ ' + name + ' (' + r.status + ' ' + (await r.text()) + ')', 'err');
+      })
+      .catch(e => log('err: ' + e, 'err'));
 
   fetch('/seqs').then(r => r.json()).then(list => {
-    const root = document.getElementById('seqs');
+    const root = $('seqs');
     root.innerHTML = '';
+    $('seq-count').textContent = list.length + ' total';
+    const groups = {};
     list.forEach(s => {
-      const b = document.createElement('button');
-      b.className = 'seq';
-      b.innerHTML = s.name + '<small>' + s.desc + '</small>';
-      b.addEventListener('click', () => runSeq(s.i, s.name));
-      root.appendChild(b);
+      const g = categorize(s);
+      (groups[g] = groups[g] || []).push(s);
+    });
+    groupOrder.forEach(g => {
+      if (!groups[g]) return;
+      const wrap = document.createElement('div');
+      wrap.className = 'seqgroup';
+      const h = document.createElement('h3');
+      h.textContent = g;
+      const grid = document.createElement('div');
+      grid.className = 'seqgrid';
+      groups[g].forEach(s => {
+        const b = document.createElement('button');
+        b.className = 'seq';
+        b.title = s.desc;
+        const nm = document.createElement('span'); nm.className = 'name'; nm.textContent = s.name;
+        const ds = document.createElement('span'); ds.className = 'desc'; ds.textContent = s.desc;
+        b.appendChild(nm); b.appendChild(ds);
+        b.addEventListener('click', () => runSeq(s.i, s.name));
+        grid.appendChild(b);
+      });
+      wrap.appendChild(h);
+      wrap.appendChild(grid);
+      root.appendChild(wrap);
     });
   }).catch(e => {
-    document.getElementById('seqs').textContent = 'failed to load: ' + e;
+    $('seqs').textContent = 'failed to load: ' + e;
   });
 
-  // DSKY display mirror — polls /state on a short interval and renders
-  // the same fields the ST7789 LCD shows. Underscore ("_") is the AGC's
-  // blank-digit code and is dimmed via the .blank class.
+  /* ---------- descent thrust ---------- */
+  const thrustBtn   = $('thrust-toggle');
+  const thrustState = $('thrust-state');
+  const thrustV     = $('thrust-state-v');
+  thrustBtn.addEventListener('click', () => {
+    const next = thrustBtn.dataset.on === '1' ? '0' : '1';
+    fetch('/thrust', { method: 'POST', body: next })
+      .then(r => {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        thrustBtn.dataset.on = next;
+        thrustBtn.textContent = next === '1' ? 'Stop descent thrust' : 'Start descent thrust';
+        thrustState.classList.toggle('on', next === '1');
+        thrustV.textContent = next === '1' ? 'ON' : 'OFF';
+        log((next === '1' ? '▶' : '■') + ' descent thrust', 'run');
+      })
+      .catch(e => log('thrust err: ' + e, 'err'));
+  });
+
+  /* ---------- DSKY mirror ---------- */
   const renderDigits = (id, s) => {
-    const el = document.getElementById(id);
-    el.textContent = s;
-    // Re-emit with dimmed blanks for visual fidelity.
+    const el = $(id);
     el.innerHTML = '';
     for (const c of s) {
       const span = document.createElement('span');
@@ -188,26 +490,63 @@
       el.appendChild(span);
     }
   };
-  const setLamp = (id, on) => {
-    document.getElementById(id).classList.toggle('on', !!on);
+  const setLamp = (id, on) => $(id).classList.toggle('on', !!on);
+
+  // Decode tables — kept short, only the modes we actually drive.
+  const PROG_NAMES = {
+    '00': 'idle',          '01': 'prelaunch',     '02': 'gyrocompass',
+    '06': 'shutdown',      '11': 'ascent',        '12': 'powered ascent',
+    '20': 'rendezvous nav','22': 'lunar surface', '27': 'CMC update',
+    '40': 'DPS thrust',    '47': 'thrust monitor','51': 'IMU align',
+    '52': 'IMU realign',   '57': 'lunar align',   '63': 'braking',
+    '64': 'approach',      '65': 'land. auto',    '66': 'land. ROD',
+    '67': 'manual land.',  '68': 'landing conf.', '70': 'DPS abort',
+    '71': 'APS abort',
   };
+  const VERB_NAMES = {
+    '05': 'display alarms','06': 'display decimal','16': 'monitor decimal',
+    '21': 'load 1',        '25': 'load 3',         '32': 'recycle',
+    '33': 'proceed',       '34': 'terminate',      '35': 'lamp test',
+    '36': 'fresh start',   '37': 'change program', '71': 'uplink block',
+    '75': 'liftoff',       '82': 'orbit params',
+  };
+  const NOUN_NAMES = {
+    '09': 'alarm codes',   '17': 'attitude err',   '36': 'mission time',
+    '37': 'TIG of TPI',    '40': 'time/vel',       '43': 'lat/long/alt',
+    '44': 'apo/peri/TFF',  '50': 'splash err',     '54': 'range/range-rate',
+    '62': 'velocity',      '63': 'ALT/HDOT/TTOGO',
+    '64': 'LR/h err',      '65': 'sample time',    '68': 'slant rng/alt err',
+    '69': 'land. site Δ',  '74': 'rate err',
+  };
+  const decode = (tbl, s) => tbl[s] || (s.includes('_') ? '' : '');
+
   let lastGen = -1;
+  let lastOk  = 0;
+  const setConn = (ok) => {
+    $('conn-led').className = 'led ' + (ok ? 'ok' : 'bad');
+    $('conn-text').textContent = ok ? 'online' : 'offline';
+  };
   const pollState = async () => {
     try {
       const r = await fetch('/state', { cache: 'no-store' });
-      if (!r.ok) return;
+      if (!r.ok) throw new Error('HTTP ' + r.status);
       const s = await r.json();
+      lastOk = Date.now();
+      setConn(true);
       if (s.gen === lastGen) return;
       lastGen = s.gen;
+      $('gen-num').textContent = s.gen;
       renderDigits('prog', s.prog);
       renderDigits('verb', s.verb);
       renderDigits('noun', s.noun);
       renderDigits('r1', s.r1);
       renderDigits('r2', s.r2);
       renderDigits('r3', s.r3);
-      // V/N flash gets a CSS animation when set.
-      document.getElementById('verb').classList.toggle('flash', !!s.fvn);
-      document.getElementById('noun').classList.toggle('flash', !!s.fvn);
+      $('prog-name').textContent = decode(PROG_NAMES, s.prog) || ' ';
+      $('verb-name').textContent = decode(VERB_NAMES, s.verb) || ' ';
+      $('noun-name').textContent = decode(NOUN_NAMES, s.noun) || ' ';
+      $('verb').classList.toggle('flash', !!s.fvn);
+      $('noun').classList.toggle('flash', !!s.fvn);
       setLamp('L_ca',    s.ca);
       setLamp('L_up',    s.up);
       setLamp('L_temp',  s.temp);
@@ -220,8 +559,10 @@
       setLamp('L_oe',    s.oe);
       setLamp('L_stby',  s.stby);
       setLamp('L_fvn',   s.fvn);
-    } catch (e) { /* network blip, try again next tick */ }
+    } catch (e) {
+      if (Date.now() - lastOk > 1500) setConn(false);
+    }
   };
-  setInterval(pollState, 200);   // 5 Hz — gentle on the ESP32 HTTP server
+  setInterval(pollState, 200);
   pollState();
 </script>
