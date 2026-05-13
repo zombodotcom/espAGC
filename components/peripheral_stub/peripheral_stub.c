@@ -483,6 +483,24 @@ void peripheral_stub_step(agc_t *state, uint32_t dt_us)
     }
 }
 
+// ===========================================================================
+// LEGACY RESCUE CHAIN (only compiled when !CONFIG_AGC_YAAGC_SOCKET)
+// ===========================================================================
+// These functions papered over the in-process-driver bug that
+// CONFIG_AGC_YAAGC_SOCKET fixes structurally. With the canonical socket
+// port (default on firmware), the engine handles CHARIN dispatch / job
+// swaps / interpretive deadlocks correctly through the same path
+// yaAGC.exe uses on Pi/Linux — these rescues are dead code.
+//
+// Kept under #ifndef CONFIG_AGC_YAAGC_SOCKET so host Layer-2 tests that
+// compile without the flag (and therefore use the legacy
+// channel_router_pump_input + force_dispatch path) continue to link
+// and pass. The firmware binary doesn't carry any of this.
+//
+// Remove the whole #ifndef block once the host test layer is migrated
+// to the canonical drain too (next-but-one cleanup).
+#ifndef CONFIG_AGC_YAAGC_SOCKET
+
 // Stuck-job recovery via simulated GOJAM. Cold-boot Luminary's
 // 1/ACCSET (PRIO27 + offset 110 = priority 027110, allocated by
 // DAPIDLER) enters interpretive code that gets caught in
@@ -804,6 +822,9 @@ static void force_dispatch_charin(agc_t *s)
              s->Erasable[0][5] & 077777,
              s->Erasable[0][4] & 077777);
 }
+
+#endif // !CONFIG_AGC_YAAGC_SOCKET — end of legacy rescue chain
+// ===========================================================================
 
 void peripheral_stub_tick(agc_t *state)
 {
