@@ -419,6 +419,18 @@ int yaagc_socket_inject_key(int code)
     return yaagc_socket_inject_packet(015, code & 037, 0);
 }
 
+int yaagc_socket_inject_uplink_key(int code)
+{
+    // CCC encoding: bits 14-10 = code, bits 9-5 = ~code (5-bit
+    // complement), bits 4-0 = code. UPRPT1's two UPTEST checks pass
+    // when LOW5 + MID5 == 037 (i.e. MID5 = ~LOW5) and the equivalent
+    // for HI5.
+    int c5 = code & 0x1F;
+    int mid5 = (~c5) & 0x1F;
+    int word = (c5 << 10) | (mid5 << 5) | c5;
+    return yaagc_socket_inject_packet(0173, word, 0);
+}
+
 void yaagc_socket_shutdown(void)
 {
     if (s_server_sock >= 0) { close(s_server_sock); s_server_sock = -1; }

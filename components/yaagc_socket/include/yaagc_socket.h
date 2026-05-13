@@ -58,6 +58,24 @@ int yaagc_socket_inject_packet(int channel, int value, int is_mask);
 // existing channel_router_post_key call sites.
 int yaagc_socket_inject_key(int code);
 
+// Inject a DSKY keystroke via the UPRUPT (uplink) path, as if Mission
+// Control was driving the AGC. The 5-bit DSKY key code is wrapped in
+// the canonical Apollo CCC (Code/Complement/Code) format per
+// KEYRUPT,_UPRUPT.agc:74-89 (UPRPT1 routine):
+//
+//     word = (code << 10) | ((~code & 037) << 5) | code
+//
+// then sent on channel 0o173 (INLINK), which fires UPRUPT (interrupt 7).
+// Luminary's UPRPT1 decodes the triple-redundancy check, validates the
+// LOW5+MID5 and LOW5+HI5 sums against HI10=0o77740, and on success
+// dispatches to ACCEPTUP -> CHARIN with the 5-bit code in RUPTREG4 —
+// identical handling to a real DSKY keystroke.
+//
+// Building block for future state-vector / pad-load injection
+// (V21NXXE typing sequences uplinked the way MCC did during the
+// actual mission). Returns 0 on success, -1 on ring full.
+int yaagc_socket_inject_uplink_key(int code);
+
 #ifdef __cplusplus
 }
 #endif
