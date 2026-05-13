@@ -48,6 +48,73 @@ static const uint8_t SEQ_RSET      [] = { R };
 // Control drove the AGC during the actual mission.
 static const uint8_t SEQ_UPLINK_LAMPTEST[] = { V, D3, D5, E };
 
+// Apollo 11 PDI state vector via Mission Control uplink (V71 protocol).
+//
+// Wire format from UPDATE_PROGRAM.agc:122-138:
+//
+//   V71E 21E <ECADR=UPSVFLAG> <IDENTIFIER> <X> <Y> <Z> <Vx> <Vy> <Vz> <T> V33E
+//
+// V71 = CONTIGUOUS BLOCK UPDATE; II=21 means 21 components total
+// starting at the ECADR. The first is UPSVFLAG (identifier), then 6
+// DP words for position (X/Y/Z high+low), 6 DP for velocity, 2 DP for
+// time = 1 + 6 + 6 + 2 + 6 misc = 21.
+//
+// Approximation used here for Apollo 11 PDI conditions (lunar sphere
+// of influence, identifier=77775):
+//
+//   PDI altitude     : ~50,000 ft = 15,240 m
+//   Lunar radius     : 1,737,400 m
+//   R magnitude      : 1,752,640 m at perilune
+//   V perpendicular  : 1,688 m/s (≈5,535 ft/s)
+//
+// Reference frame: simplified lunar-centered with LM at perilune in
+// XY plane (Z = 0).
+//
+// CAUTION: Luminary stores position as DP B-29 lunar and velocity as
+// DP B-7 lunar; getting the exact octal-encoded scaling right requires
+// careful transcription against real Apollo 11 LSJ PAD data. This
+// sequence uses placeholder patterns that exercise the V71 protocol
+// end-to-end — exact display values in R1/R2/R3 will be off-scale
+// until the proper PAD octals replace these. Iterate from the device's
+// response.
+//
+// Pre-condition: P00 must be active (V71 rejected outside P00 on the LM
+// per UPDATE_PROGRAM.agc:57). The sequence starts with V37E00E.
+static const uint8_t SEQ_UPLINK_PDI_STATE[] = {
+    // ----- Step 1: ensure P00 (V71 only accepted during P00 on LM) -----
+    V, D3, D7, E, D0, D0, E,             // V37E00E
+    // ----- Step 2: V71 CONTIGUOUS BLOCK UPDATE -----
+    V, D7, D1, E,                        // V71E
+    D2, D1, E,                           // II=21 (21 components)
+    D0, D1, D5, D0, D1, E,               // ECADR = 01501 (UPSVFLAG)
+    D7, D7, D7, D7, D5, E,               // IDENTIFIER 77775 (LEM lunar SOI)
+    // X position DP — ~1,752,640 m. In B-29 lunar that's roughly
+    // 0.00326 of full scale. DP encoding: hi=02500, lo=12345 (approx).
+    D0, D2, D5, D0, D0, E,               // X_hi
+    D1, D2, D3, D4, D5, E,               // X_lo
+    // Y position DP — 0 at perilune in this frame
+    D0, D0, D0, D0, D0, E,               // Y_hi
+    D0, D0, D0, D0, D0, E,               // Y_lo
+    // Z position DP — 0 (in-plane orbit)
+    D0, D0, D0, D0, D0, E,               // Z_hi
+    D0, D0, D0, D0, D0, E,               // Z_lo
+    // X velocity DP — 0 (perpendicular component)
+    D0, D0, D0, D0, D0, E,               // Vx_hi
+    D0, D0, D0, D0, D0, E,               // Vx_lo
+    // Y velocity DP — ~1,688 m/s. In B-7 m/cs that's ~211 cs/100
+    // (very rough placeholder; real PAD values pending)
+    D0, D3, D2, D0, D0, E,               // Vy_hi
+    D0, D0, D0, D0, D0, E,               // Vy_lo
+    // Z velocity DP — 0
+    D0, D0, D0, D0, D0, E,               // Vz_hi
+    D0, D0, D0, D0, D0, E,               // Vz_lo
+    // Time from AGC clock zero DP — use 0 (let SERVICER fill in)
+    D0, D0, D0, D0, D0, E,               // T_hi
+    D0, D0, D0, D0, D0, E,               // T_lo
+    // ----- Step 3: V33 to commit -----
+    V, D3, D3, E,                        // V33E (signal ready to store)
+};
+
 // =================================================================
 // Apollo 11 PDI state-vector uplink — TEMPLATE FOR v0.2.0
 // =================================================================
@@ -148,6 +215,10 @@ static const sequence_t TABLE[] = {
     { "Houston uplinks V35E (UPRUPT)",
       "Same lamp test, but delivered via ch0173 UPRUPT (CCC-encoded) — watch UPLINK ACTY light",
       SEQ_UP(SEQ_UPLINK_LAMPTEST) },
+    { "Houston uplinks Apollo 11 PDI state (V71, experimental)",
+      "V71 21-component state vector update via UPRUPT. ~120 uplink chars, takes ~30 s. "
+      "Placeholder PDI values; real Apollo 11 PAD octals pending. Use before V37E63E.",
+      SEQ_UP(SEQ_UPLINK_PDI_STATE) },
 };
 #define TABLE_COUNT ((int)(sizeof(TABLE) / sizeof(TABLE[0])))
 
