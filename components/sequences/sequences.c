@@ -41,6 +41,12 @@ static const uint8_t SEQ_P63_LANDING[] = { V, D3, D7, E, D6, D3, E };
 static const uint8_t SEQ_DISP_TIME [] = { V, D1, D6, N, D3, D6, E };
 static const uint8_t SEQ_DISP_ALARM[] = { V, D0, D5, N, D0, D9, E };
 static const uint8_t SEQ_RSET      [] = { R };
+// "Houston-uplinks V35E" — same DSKY effect as the regular lamp test, but
+// delivered through UPRUPT (ch0173 CCC) instead of KEYRUPT1 (ch015). The
+// difference is visible: the UPLINK ACTY lamp (top-left of the indicator
+// panel) lights as each character arrives, exactly as it did when Mission
+// Control drove the AGC during the actual mission.
+static const uint8_t SEQ_UPLINK_LAMPTEST[] = { V, D3, D5, E };
 
 // Apollo 11 landing — Armstrong/Aldrin DSKY keystroke timeline from the
 // Lunar Surface Journal (https://www.hq.nasa.gov/alsj/a11/a11.landing.html)
@@ -83,7 +89,8 @@ static const uint8_t SEQ_APOLLO11_LANDING[] = {
     V, D0, D6, N, D4, D3, E,        // V06N43E — display latitude / longitude / alt
 };
 
-#define SEQ(arr) (arr), (int)(sizeof(arr) / sizeof((arr)[0]))
+#define SEQ(arr)      (arr), (int)(sizeof(arr) / sizeof((arr)[0])), 0
+#define SEQ_UP(arr)   (arr), (int)(sizeof(arr) / sizeof((arr)[0])), SEQ_FLAG_UPLINK
 
 static const sequence_t TABLE[] = {
     { "Lamp test (V35E)",    "Light every status indicator briefly", SEQ(SEQ_LAMP_TEST)  },
@@ -96,6 +103,9 @@ static const sequence_t TABLE[] = {
     { "Display time (V16N36E)", "R1 shows mission elapsed time",      SEQ(SEQ_DISP_TIME)  },
     { "Display alarms (V05N09E)", "R1 shows latest program alarm",    SEQ(SEQ_DISP_ALARM) },
     { "Reset (RSET)",        "Clear OPR ERR / abandon partial entry", SEQ(SEQ_RSET)       },
+    { "Houston uplinks V35E (UPRUPT)",
+      "Same lamp test, but delivered via ch0173 UPRUPT (CCC-encoded) — watch UPLINK ACTY light",
+      SEQ_UP(SEQ_UPLINK_LAMPTEST) },
 };
 #define TABLE_COUNT ((int)(sizeof(TABLE) / sizeof(TABLE[0])))
 
@@ -106,14 +116,33 @@ const sequence_t *sequences_get(int i)          { return (i >= 0 && i < TABLE_CO
 
 static SemaphoreHandle_t s_busy;     // taken while a sequence is running
 
+// Forward decl — provided by components/yaagc_socket when the canonical
+// path is on. Falls back to no-op when off (legacy host tests don't link
+// the symbol, so calls below are gated).
+#ifdef CONFIG_AGC_YAAGC_SOCKET
+extern int yaagc_socket_inject_uplink_key(int code);
+#endif
+
 static void runner_task(void *arg)
 {
     int idx = (int)(intptr_t)arg;
     const sequence_t *s = sequences_get(idx);
     if (s) {
-        ESP_LOGI(TAG, "running '%s' (%d keys)", s->name, s->key_count);
+        const int via_uplink = (s->flags & SEQ_FLAG_UPLINK) ? 1 : 0;
+        ESP_LOGI(TAG, "running '%s' (%d keys, %s)", s->name, s->key_count,
+                 via_uplink ? "UPRUPT/ch0173" : "KEYRUPT1/ch015");
         for (int i = 0; i < s->key_count; i++) {
-            channel_router_post_key(s->keys[i]);
+            if (via_uplink) {
+#ifdef CONFIG_AGC_YAAGC_SOCKET
+                yaagc_socket_inject_uplink_key(s->keys[i]);
+#else
+                // UPRUPT path requires the canonical socket layer. Fall
+                // back to KEYRUPT1 so the sequence at least visibly runs.
+                channel_router_post_key(s->keys[i]);
+#endif
+            } else {
+                channel_router_post_key(s->keys[i]);
+            }
             vTaskDelay(pdMS_TO_TICKS(KEY_GAP_MS));
         }
         ESP_LOGI(TAG, "done '%s'", s->name);

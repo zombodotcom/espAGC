@@ -11,11 +11,19 @@
 extern "C" {
 #endif
 
+// Flags for sequence_t.flags
+#define SEQ_FLAG_UPLINK  (1u << 0)   // inject via UPRUPT (ch0173) instead of
+                                      // KEYRUPT1 (ch015). When set, the runner
+                                      // wraps each key in canonical CCC encoding
+                                      // and sends to ch0173 — same path
+                                      // Mission Control used during Apollo.
+
 typedef struct {
     const char    *name;
     const char    *description;
     const uint8_t *keys;        // array of dsky_key_t codes (5 bits each)
     int            key_count;
+    unsigned       flags;
 } sequence_t;
 
 int                 sequences_count(void);

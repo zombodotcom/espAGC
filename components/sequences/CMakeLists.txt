@@ -1,5 +1,6 @@
 idf_component_register(
-    SRCS         "sequences.c"
-    INCLUDE_DIRS "include"
-    REQUIRES     channel_router freertos log
+    SRCS          "sequences.c"
+    INCLUDE_DIRS  "include"
+    REQUIRES      channel_router freertos log
+    PRIV_REQUIRES yaagc_socket
 )
