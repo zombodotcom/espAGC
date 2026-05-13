@@ -48,6 +48,48 @@ static const uint8_t SEQ_RSET      [] = { R };
 // Control drove the AGC during the actual mission.
 static const uint8_t SEQ_UPLINK_LAMPTEST[] = { V, D3, D5, E };
 
+// =================================================================
+// Apollo 11 PDI state-vector uplink — TEMPLATE FOR v0.2.0
+// =================================================================
+//
+// The canonical Mission Control state-vector load (UPDATE_PROGRAM.agc:122-138)
+// is V71 (CONTIGUOUS BLOCK UPDATE) with 21 components starting at UPSVFLAG.
+// Address constants (from yaYUL listing of Luminary099):
+//
+//   UPSVFLAG ECADR = 01501   (state-vector update flag)
+//   RN       ECADR = 01220   (R-vector, 6 cells, 3 components in DP)
+//   VN       ECADR = 01226   (V-vector, 6 cells, 3 components in DP)
+//
+// Wire format (each XXXXX = 5-digit octal, each E = ENTR):
+//
+//   V71E                 # CONTIGUOUS BLOCK UPDATE
+//   21E                  # II = 21 components (II-2 = 19 data items)
+//   01501E               # AAAA = ECADR of UPSVFLAG
+//   77775E               # IDENTIFIER: 77775 = LEM lunar sphere of influence
+//   XXXXXE XXXXXE        # X position (DP)
+//   XXXXXE XXXXXE        # Y position
+//   XXXXXE XXXXXE        # Z position
+//   XXXXXE XXXXXE        # X velocity
+//   XXXXXE XXXXXE        # Y velocity
+//   XXXXXE XXXXXE        # Z velocity
+//   XXXXXE XXXXXE        # Time from AGC clock zero (DP)
+//   V33E                 # Commit — Luminary stores to RN/VN/PIPTIME
+//
+// CRITICAL: V71 only accepted during P00 on the LM (and only P00, P02
+// or fresh-start on CSM). Send V37E00E first to ensure P00 is active.
+//
+// What's missing to make this fly:
+//   - Apollo 11 PDI initial position/velocity in Luminary's specific
+//     B-29 (position) / B-7 (velocity) lunar scaling. Public via LSJ
+//     pre-PDI pad records but needs careful transcription.
+//   - REFSMMAT (uses similar V71 24-component sequence at ECADR REFSMMAT).
+//     Without this the IMU doesn't know which way is "down".
+//   - DAP coefficients (MASS, etc.) — separate P-axis autopilot pad load.
+//
+// The UPRUPT typing primitive (yaagc_socket_inject_uplink_key) is in
+// place and verified end-to-end on hardware (probe_uprupt2.py). Once
+// the PAD values land, this sequence is ~30 lines and ships v0.2.0.
+
 // Apollo 11 landing — Armstrong/Aldrin DSKY keystroke timeline from the
 // Lunar Surface Journal (https://www.hq.nasa.gov/alsj/a11/a11.landing.html)
 // and the LGC keystroke log. The original descent ran ~12 minutes (PDI at
