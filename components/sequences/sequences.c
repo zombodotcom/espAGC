@@ -80,48 +80,56 @@ static const uint8_t SEQ_UPLINK_LAMPTEST[] = { V, D3, D5, E };
 //
 // Pre-condition: P00 must be active (V71 rejected outside P00 on the LM
 // per UPDATE_PROGRAM.agc:57). The sequence starts with V37E00E.
+// Real Apollo 11 LM state vector ~10 minutes before PDI, sourced from
+// the virtualagc canonical scenarios branch — Luminary099 core dump
+// "Apollo 11 P63 Ignition Algorithm.core" (post-DOI, on landing
+// trajectory). Values are RRECTLEM/VRECTLEM/TETLEM extracted from
+// bank 3 offsets 0o226..0o243 of the core dump, written as-is into the
+// V71 temporary slot at UPSVFLAG (ECADR 01501). After V33E commits,
+// Luminary integrates these into the permanent RRECTLEM/VRECTLEM/TETLEM.
+//
+// State-vector identifier 77775 selects LEM lunar-SOI scaling:
+//   RRECT — meters, scaled B-27   (NOT B-29; see Luminary069 PADLOADS:
+//           "METERS, B-29 OR B-27 IF EARTH OR MOON")
+//   VRECT — m/cs,   scaled B-5    ("M/CSEC, B-7 OR B-5 IF EARTH OR MOON")
+//   TET   — csec,   scaled B-28
+//
+// Decoded sanity check (positive components inverted from 1's complement
+// when sign bit is set, magnitudes combined as hi*2^14 + lo):
+//   R = (-60 km, +1627 km, +696 km)   →  |R| ≈ 1770 km (lunar surface ≈ 1738 km)
+//   V = (+1679, +22.5, +2.8) m/s      →  |V| ≈ 1679 m/s (lunar orbital ≈ 1.68 km/s)
+//   TET ≈ 102:25:13 since AGC clock zero  → matches "T-10 before PDI"
+//
+// V71 component count math (UPDATE_PROGRAM.agc:250-259 + UPEND71:434-444):
+//   3 ≤ II ≤ 20 strict; words stored at ECADR = COMPNUMB - 2 = II - 2
+//   For state vector: 1 identifier + 6 R + 6 V + 2 TET = 15 → II = 17.
+//   (The L099 doc on page 1388 saying "21E" is a transcription error;
+//    II=21 fails the range check at OHWELL1+2.)
 static const uint8_t SEQ_UPLINK_PDI_STATE[] = {
     // ----- Step 1: ensure P00 (V71 only accepted during P00 on LM) -----
     V, D3, D7, E, D0, D0, E,             // V37E00E
     // ----- Step 2: V71 CONTIGUOUS BLOCK UPDATE -----
     V, D7, D1, E,                        // V71E
-    D2, D1, E,                           // II=21 (21 components)
+    D1, D7, E,                           // II=17 (15 data words after ECADR)
     D0, D1, D5, D0, D1, E,               // ECADR = 01501 (UPSVFLAG)
     D7, D7, D7, D7, D5, E,               // IDENTIFIER 77775 (LEM lunar SOI)
-    // X position DP — ~1,752,640 m. In B-29 lunar that's roughly
-    // 0.00326 of full scale. DP encoding: hi=02500, lo=12345 (approx).
-    D0, D2, D5, D0, D0, E,               // X_hi
-    D1, D2, D3, D4, D5, E,               // X_lo
-    // Y position DP — 0 at perilune in this frame
-    D0, D0, D0, D0, D0, E,               // Y_hi
-    D0, D0, D0, D0, D0, E,               // Y_lo
-    // Z position DP — 0 (in-plane orbit)
-    D0, D0, D0, D0, D0, E,               // Z_hi
-    D0, D0, D0, D0, D0, E,               // Z_lo
-    // X velocity DP — 0 (perpendicular component)
-    D0, D0, D0, D0, D0, E,               // Vx_hi
-    D0, D0, D0, D0, D0, E,               // Vx_lo
-    // Y velocity DP — ~1,688 m/s. In B-7 m/cs that's ~211 cs/100
-    // (very rough placeholder; real PAD values pending)
-    D0, D3, D2, D0, D0, E,               // Vy_hi
-    D0, D0, D0, D0, D0, E,               // Vy_lo
-    // Z velocity DP — 0
-    D0, D0, D0, D0, D0, E,               // Vz_hi
-    D0, D0, D0, D0, D0, E,               // Vz_lo
-    // Time from AGC clock zero DP — use 0 (let SERVICER fill in)
-    D0, D0, D0, D0, D0, E,               // T_hi
-    D0, D0, D0, D0, D0, E,               // T_lo
-    // V71 21-component update writes 19 data items after the ECADR
-    // (II-2 per UPDATE_PROGRAM.agc:94-99). The state-vector layout
-    // above accounts for 15 of those; the trailing 4 are auxiliary
-    // cells UPSVFLAG..+18 (likely RRECT/VRECT continuations and
-    // alignment-padding storage). P27 won't fire V33E commit until
-    // it sees all 19, so we feed zeros and let Luminary's internal
-    // post-load processing populate the working copies.
-    D0, D0, D0, D0, D0, E,               // pad 1
-    D0, D0, D0, D0, D0, E,               // pad 2
-    D0, D0, D0, D0, D0, E,               // pad 3
-    D0, D0, D0, D0, D0, E,               // pad 4
+    // RRECT — position DP triple, 3 components × 2 words = 6 entries
+    D7, D7, D7, D7, D0, E,               // RRECT[0] X_hi = 077770 (≈ -60 km)
+    D6, D4, D4, D4, D4, E,               // RRECT[1] X_lo = 064444
+    D0, D0, D3, D0, D6, E,               // RRECT[2] Y_hi = 000306 (≈ +1627 km)
+    D2, D3, D3, D4, D6, E,               // RRECT[3] Y_lo = 023346
+    D0, D0, D1, D2, D5, E,               // RRECT[4] Z_hi = 000125 (≈ +696 km)
+    D0, D0, D2, D2, D3, E,               // RRECT[5] Z_lo = 000223
+    // VRECT — velocity DP triple, 3 components × 2 words = 6 entries
+    D2, D0, D6, D2, D1, E,               // VRECT[0] Vx_hi = 020621 (≈ +1679 m/s)
+    D0, D0, D2, D7, D5, E,               // VRECT[1] Vx_lo = 000275
+    D0, D0, D1, D6, D3, E,               // VRECT[2] Vy_hi = 000163 (≈ +22.5 m/s)
+    D0, D0, D7, D6, D5, E,               // VRECT[3] Vy_lo = 000765
+    D0, D0, D0, D1, D6, E,               // VRECT[4] Vz_hi = 000016 (≈ +2.8 m/s)
+    D0, D4, D5, D4, D5, E,               // VRECT[5] Vz_lo = 004545
+    // TET — time DP, 1 component × 2 words = 2 entries
+    D0, D4, D3, D1, D2, E,               // TET[0] T_hi = 004312 (≈ 102:25 GET)
+    D1, D6, D1, D4, D0, E,               // TET[1] T_lo = 016140
     // ----- Step 3: V33 to commit -----
     V, D3, D3, E,                        // V33E (signal ready to store)
 };
@@ -226,9 +234,10 @@ static const sequence_t TABLE[] = {
     { "Houston uplinks V35E (UPRUPT)",
       "Same lamp test, but delivered via ch0173 UPRUPT (CCC-encoded) — watch UPLINK ACTY light",
       SEQ_UP(SEQ_UPLINK_LAMPTEST) },
-    { "Houston uplinks Apollo 11 PDI state (V71, experimental)",
-      "V71 21-component state vector update via UPRUPT. ~120 uplink chars, takes ~30 s. "
-      "Placeholder PDI values; real Apollo 11 PAD octals pending. Use before V37E63E.",
+    { "Houston uplinks Apollo 11 PDI state (V71)",
+      "V71 17-component state vector update via UPRUPT (CCC-encoded). "
+      "Real RRECT/VRECT/TET from virtualagc scenarios Apollo 11 P63 core dump "
+      "(post-DOI, T-10 min before PDI). ~95 uplink chars, ~25 s. Use before V37E63E.",
       SEQ_UP(SEQ_UPLINK_PDI_STATE) },
 };
 #define TABLE_COUNT ((int)(sizeof(TABLE) / sizeof(TABLE[0])))
